@@ -1,0 +1,8 @@
+# Submodule folders (kept local, not tracked in this repo)
+engine/
+splat-transform/
+supersplat/
+
+# Local dependencies and temp artifacts
+tools/bridge-server/node_modules/
+tools/bridge-server/tmp/
