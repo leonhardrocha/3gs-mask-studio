@@ -1,0 +1,9 @@
+[submodule "supersplat"]
+	path = supersplat
+	url = https://github.com/playcanvas/supersplat.git
+[submodule "engine"]
+	path = engine
+	url = https://github.com/playcanvas/engine.git
+[submodule "splat-transform"]
+	path = splat-transform
+	url = https://github.com/playcanvas/splat-transform.git

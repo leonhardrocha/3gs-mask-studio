@@ -1,0 +1,25 @@
+{
+  "name": "3gs-mask-bridge-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local bridge server for VR mask processing",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test:cone-math": "node --test scripts/cone-selection-math.test.mjs",
+    "test:plugin-bridge-smoke": "node scripts/plugin-bridge-smoke.mjs",
+    "test:ply-exporter": "node --test scripts/ply-exporter-contract.test.mjs",
+    "test:round-trip": "node --test scripts/round-trip.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+  ,
+  "devDependencies": {
+    "@playcanvas/splat-transform": "file:../../splat-transform"
+  }
+}
