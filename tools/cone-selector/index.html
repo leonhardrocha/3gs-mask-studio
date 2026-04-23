@@ -144,7 +144,7 @@
     <div class="section">
       <label>URL SuperSplat</label>
       <div id="splat-url-bar">
-        <input id="supersplat-url" type="text" value="http://localhost:8080/supersplat/dist/" />
+        <input id="supersplat-url" type="text" value="http://localhost:8080/supersplat/dist/index.html" />
         <button onclick="loadSuperSplat()">▶</button>
       </div>
       <label>Splat URL (para carregar via ?load=)</label>
@@ -196,7 +196,7 @@
 
   <!-- Área do iframe SuperSplat -->
   <div id="frame-wrap">
-    <iframe id="supersplat-frame" src="http://localhost:8080/supersplat/dist/"
+    <iframe id="supersplat-frame" src="http://localhost:8080/supersplat/dist/index.html"
       allow="xr-spatial-tracking; camera; microphone"
       sandbox="allow-scripts allow-same-origin allow-forms allow-popups">
     </iframe>
@@ -255,16 +255,46 @@ function getFrameDocument() {
 // Carregar SuperSplat no iframe
 // ---------------------------------------------------------------------------
 function loadSuperSplat() {
-    const url = document.getElementById('supersplat-url').value.trim();
+  const raw = document.getElementById('supersplat-url').value.trim();
+  const url = raw || `${window.location.origin}/supersplat/dist/index.html`;
     document.getElementById('supersplat-frame').src = url;
     setStatus(`Carregando: ${url}`);
 }
 
+function normalizeSupersplatUrl(rawUrl) {
+  const fallback = `${window.location.origin}/supersplat/dist/index.html`;
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return fallback;
+
+  try {
+    const u = new URL(trimmed, window.location.origin);
+    if (u.pathname.endsWith('/')) {
+      u.pathname += 'index.html';
+    } else if (!u.pathname.endsWith('/index.html')) {
+      const lastSegment = u.pathname.split('/').pop() || '';
+      if (!lastSegment.includes('.')) {
+        u.pathname += '/index.html';
+      }
+    }
+    return u.toString();
+  } catch (_e) {
+    return fallback;
+  }
+}
+
 function openWithSplat() {
-    const base = document.getElementById('supersplat-url').value.trim().replace(/\/$/, '');
+  const base = normalizeSupersplatUrl(document.getElementById('supersplat-url').value);
     const splat = document.getElementById('splat-url').value.trim();
-    const url = `${base}?load=${encodeURIComponent(splat)}`;
-    document.getElementById('supersplat-frame').src = url;
+  const u = new URL(base);
+  const filename = splat.split('/').pop() || 'sample.ply';
+
+  u.searchParams.delete('load');
+  u.searchParams.delete('filename');
+  u.searchParams.append('load', splat);
+  u.searchParams.append('filename', filename);
+
+  const finalUrl = u.toString();
+  document.getElementById('supersplat-frame').src = finalUrl;
     setStatus(`Abrindo SuperSplat com splat: ${splat}`);
 }
 
