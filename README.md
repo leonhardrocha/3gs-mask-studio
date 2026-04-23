@@ -165,7 +165,7 @@ O wrapper em `tools/cone-selector/index.html` fornece um fluxo sem modificar o c
 
 - sidebar com parâmetros do cone (`apex`, `axis`, `angle`, `range`, `op`)
 - campo para URL do splat
-- botão `Abrir com splat`, que monta `http://localhost:3000/?load=<PLY_URL>`
+- botão `Abrir com splat`, que monta `<SUPERSPLAT_URL>?load=<PLY_URL>`
 - comunicação com o iframe do SuperSplat via `window.postMessage`
 - envio da seleção ao bridge com `application/octet-stream`
 
@@ -178,17 +178,21 @@ http://localhost:8080/tools/cone-selector/index.html
 Fluxo recomendado:
 
 1. Inicie o bridge em `http://localhost:3001`.
-2. Inicie o SuperSplat em `http://localhost:3000` com `cd supersplat && npm run develop`.
-3. Inicie o servidor estático na raiz com `npx --yes serve . -p 8080`.
-4. Abra `http://localhost:8080/tools/cone-selector/index.html`.
+2. Inicie o servidor estático na raiz com `npx --yes serve . -p 8080`.
+3. Abra `http://localhost:8080/tools/cone-selector/index.html`.
+4. Mantenha a URL padrão do SuperSplat no wrapper: `http://localhost:8080/supersplat/dist/`.
 5. Use `Abrir com splat` para carregar, por exemplo, `http://localhost:8080/tools/bridge-server/sample.ply`.
 
 Observações importantes:
 
-- Se `http://localhost:3000` não estiver ativo, o botão `Abrir com splat` abrirá uma URL correta, mas o navegador mostrará a página genérica de indisponibilidade porque não existe app respondendo nessa porta.
-- O parâmetro `?load=` é suportado pelo SuperSplat; o erro observado anteriormente era de disponibilidade do servidor, não de sintaxe da URL.
-- O iframe roda em origem diferente (`3000` vs `8080`), então o wrapper não pode acessar `iframe.contentWindow.document` diretamente. O controle entre wrapper e SuperSplat usa `postMessage`.
-- O botão `Injetar Cone Selector` não consegue injetar DOM cross-origin automaticamente. Ele apenas ajuda a preparar a injeção manual quando o módulo ainda não foi carregado no contexto do SuperSplat.
+- No modo padrão (same-origin em `8080`), o botão `Injetar Cone Selector` injeta automaticamente o módulo no iframe, sem DevTools.
+- O parâmetro `?load=` é suportado pelo SuperSplat.
+
+Modo alternativo para desenvolvimento do SuperSplat em tempo real:
+
+- Rode `cd supersplat && npm run develop` para usar `http://localhost:3000`.
+- Se trocar a URL do wrapper para `http://localhost:3000`, o iframe volta a ser cross-origin (`3000` vs `8080`).
+- Nesse cenário, injeção automática no DOM do iframe é bloqueada pelo navegador e será necessário injetar manualmente no DevTools.
 
 Snippet de injeção manual no Console do DevTools do SuperSplat:
 
