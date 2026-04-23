@@ -1,5 +1,5 @@
 /**
- * main.js — Ponto de entrada do app PlayCanvas Engine standalone.
+ * main.mjs — Ponto de entrada do app PlayCanvas Engine standalone.
  *
  * Fluxo:
  *  1. Cria a aplicação PlayCanvas via pc.Application.
@@ -10,7 +10,7 @@
  */
 
 import * as pc from '../engine/build/playcanvas/src/index.js';
-import { VrMaskerScript, BRIDGE_DEFAULT_URL } from './scripts/vr-masker.js';
+import { VrMaskerScript, BRIDGE_DEFAULT_URL } from './scripts/vr-masker.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers de UI

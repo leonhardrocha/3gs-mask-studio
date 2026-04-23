@@ -1,5 +1,5 @@
 /**
- * vr-masker.js — Script PlayCanvas Engine para seleção de Gaussian Splats
+ * vr-masker.mjs — Script PlayCanvas Engine para seleção de Gaussian Splats
  * por interseção de cone em VR (ou fallback de câmera em desktop).
  *
  * Como funciona:

@@ -187,10 +187,10 @@ void main(void) {
 
 ### Fase 2 — App Engine standalone (`feat/engine-app`)
 
-- [x] `app/index.html`, `app/main.js`, `app/package.json` criados.
-- [x] `app/scripts/vr-masker.js` — `pc.Script` com cone + bridge.
-- [ ] Renomear `main.js` → `main.mjs` (ESM puro, sem `require`).
-- [ ] Validar carregamento de `.ply` via `?splat=<url>` no navegador.
+- [x] `app/index.html`, `app/main.mjs`, `app/package.json` criados.
+- [x] `app/scripts/vr-masker.mjs` — `pc.Script` com cone + bridge.
+- [x] Renomear `main.js` → `main.mjs` (ESM puro, sem `require`).
+- [x] Validar fluxo `?splat=<url>` (parsing da query + tentativa de carga via `app.assets.loadFromUrl`).
 
 ### Fase 3 — Shaders e primitiva de cone
 
