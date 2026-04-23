@@ -32,6 +32,7 @@ export const BRIDGE_DEFAULT_URL = 'http://localhost:3001/process-mask';
 
 const CONE_SHADER_VERT_URL = new URL('./cone-shader.vert.glsl', import.meta.url).href;
 const CONE_SHADER_FRAG_URL = new URL('./cone-shader.frag.glsl', import.meta.url).href;
+const SELECTION_WORKER_URL = new URL('./selection-worker.mjs', import.meta.url);
 
 // ---------------------------------------------------------------------------
 // Predicado de cone — ponto p está dentro do cone definido por apex+axis?
@@ -113,6 +114,7 @@ VrMaskerScript.attributes.add('coneRange',    { type: 'number', default: 5 });
 VrMaskerScript.attributes.add('bridgeUrl',    { type: 'string', default: BRIDGE_DEFAULT_URL });
 VrMaskerScript.attributes.add('autoSendOnStop',{ type: 'boolean', default: true });
 VrMaskerScript.attributes.add('selectionChunkSize', { type: 'number', default: 20000 });
+VrMaskerScript.attributes.add('useSelectionWorker', { type: 'boolean', default: false });
 
 VrMaskerScript.prototype.initialize = function () {
     /** @type {pc.Entity|null} */
@@ -122,6 +124,11 @@ VrMaskerScript.prototype.initialize = function () {
     this._active = false;       // trigger pressionado
     this._tanAngle = Math.tan(this.coneAngleDeg * Math.PI / 180);
     this._scanCursor = 0;
+    this._scanRequestId = 0;
+
+    this._selectionWorker = null;
+    this._workerReady = false;
+    this._workerPending = false;
 
     // Botão de ativação desktop (Espaço)
     this._keyboard = this.app.keyboard;
@@ -144,10 +151,16 @@ VrMaskerScript.prototype.initialize = function () {
     this._coneMaterial = null;
     this._coneColor = new pc.Color(0.2, 0.8, 1.0, 0.22);
     this._initConeHelper();
+    this._initSelectionWorker();
 };
 
 VrMaskerScript.prototype.setSplatEntity = function (entity) {
     this._splatEntity = entity;
+    this._scanCursor = 0;
+
+    if (this._selectionWorker) {
+        this._prepareWorkerPositions();
+    }
 };
 
 VrMaskerScript.prototype.update = function (dt) {
@@ -283,6 +296,72 @@ VrMaskerScript.prototype._getConeParams = function () {
     return { apex, axis };
 };
 
+VrMaskerScript.prototype._initSelectionWorker = function () {
+    if (!this.useSelectionWorker || typeof Worker === 'undefined') {
+        return;
+    }
+
+    try {
+        this._selectionWorker = new Worker(SELECTION_WORKER_URL, { type: 'module' });
+        this._selectionWorker.onmessage = (ev) => {
+            const msg = ev.data;
+            if (msg.type === 'positions:ready') {
+                this._workerReady = true;
+                return;
+            }
+
+            if (msg.type === 'selected') {
+                this._workerPending = false;
+                const arr = msg.indices instanceof Uint32Array ? msg.indices : new Uint32Array(msg.indices || []);
+                let changed = false;
+                for (let i = 0; i < arr.length; i++) {
+                    const idx = arr[i];
+                    if (!this._selected.has(idx)) {
+                        this._selected.add(idx);
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    this.fire('selected:update', this._selected.size);
+                }
+            }
+        };
+    } catch (err) {
+        this._selectionWorker = null;
+        this._workerReady = false;
+    }
+};
+
+VrMaskerScript.prototype._prepareWorkerPositions = function () {
+    if (!this._selectionWorker || !this._splatEntity?.gsplat?.asset?.resource?.splatData) {
+        return;
+    }
+
+    const splatData = this._splatEntity.gsplat.asset.resource.splatData;
+    const count = splatData.numSplats;
+    const worldMat = this._splatEntity.getWorldTransform();
+
+    const local = new pc.Vec3();
+    const world = new pc.Vec3();
+    const positions = new Float32Array(count * 3);
+
+    for (let i = 0; i < count; i++) {
+        local.set(
+            splatData.getElement('vertex', 'x', i),
+            splatData.getElement('vertex', 'y', i),
+            splatData.getElement('vertex', 'z', i)
+        );
+        worldMat.transformPoint(local, world);
+        const base = i * 3;
+        positions[base] = world.x;
+        positions[base + 1] = world.y;
+        positions[base + 2] = world.z;
+    }
+
+    this._workerReady = false;
+    this._selectionWorker.postMessage({ type: 'setPositions', positions }, [positions.buffer]);
+};
+
 VrMaskerScript.prototype._doSelection = function () {
     if (!this._splatEntity) return;
 
@@ -296,16 +375,34 @@ VrMaskerScript.prototype._doSelection = function () {
     const tanAngle = Math.tan(this.coneAngleDeg * Math.PI / 180);
     const maxRange = this.coneRange;
 
-    // Matriz world do entity do splat para transformar pontos para world space
-    const worldMat = this._splatEntity.getWorldTransform();
-    const p = new pc.Vec3();
-    const pw = new pc.Vec3();
-
     let changed = false;
     const count = splatData.numSplats;
     const chunkSize = Math.max(1, Math.floor(this.selectionChunkSize || 1));
     const start = this._scanCursor;
     const end = Math.min(start + chunkSize, count);
+
+    if (this._selectionWorker && this._workerReady && !this._workerPending) {
+        this._workerPending = true;
+        this._scanRequestId += 1;
+        this._selectionWorker.postMessage({
+            type: 'selectChunk',
+            requestId: this._scanRequestId,
+            start,
+            end,
+            apex: { x: apex.x, y: apex.y, z: apex.z },
+            axis: { x: axis.x, y: axis.y, z: axis.z },
+            tanAngle,
+            maxRange
+        });
+
+        this._scanCursor = end >= count ? 0 : end;
+        return;
+    }
+
+    // Fallback: seleção no thread principal
+    const worldMat = this._splatEntity.getWorldTransform();
+    const p = new pc.Vec3();
+    const pw = new pc.Vec3();
 
     for (let i = start; i < end; i++) {
         if (this._selected.has(i)) continue; // já selecionado
@@ -366,4 +463,13 @@ VrMaskerScript.prototype._sendToBridge = function () {
 VrMaskerScript.prototype.clearSelection = function () {
     this._selected.clear();
     this.fire('selected:update', 0);
+};
+
+VrMaskerScript.prototype.destroy = function () {
+    if (this._selectionWorker) {
+        this._selectionWorker.terminate();
+        this._selectionWorker = null;
+        this._workerReady = false;
+        this._workerPending = false;
+    }
 };
