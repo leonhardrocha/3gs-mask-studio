@@ -510,7 +510,7 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 - [x] Reabilitar injeção automática do `inject.mjs` quando o iframe estiver same-origin, mantendo fallback claro para URLs cross-origin.
 - [ ] Testar no navegador: `Abrir com splat` + `Injetar Cone Selector` sem DevTools quando o iframe estiver em `8080/supersplat/dist/`.
 
-**Commit**: pendente
+**Commit**: 7348648
 
 ---
 
