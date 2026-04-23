@@ -194,10 +194,10 @@ void main(void) {
 
 ### Fase 3 — Shaders e primitiva de cone
 
-- [ ] Criar `app/scripts/cone-shader.vert.glsl` e `cone-shader.frag.glsl`.
+- [x] Criar `app/scripts/cone-shader.vert.glsl` e `cone-shader.frag.glsl`.
 - [ ] Criar primitiva de cone no **PlayCanvas Editor** como asset de cena.
-- [ ] Aplicar `pc.ShaderMaterial` com os shaders acima ao cone helper.
-- [ ] Ligar posição/rotação do cone ao controlador XR em tempo real.
+- [x] Aplicar `pc.ShaderMaterial` com os shaders acima ao cone helper.
+- [x] Ligar posição/rotação do cone ao controlador XR em tempo real.
 
 ### Fase 4 — Pipeline completo
 

@@ -30,6 +30,9 @@ import * as pc from '../../engine/build/playcanvas/src/index.js';
 
 export const BRIDGE_DEFAULT_URL = 'http://localhost:3001/process-mask';
 
+const CONE_SHADER_VERT_URL = new URL('./cone-shader.vert.glsl', import.meta.url).href;
+const CONE_SHADER_FRAG_URL = new URL('./cone-shader.frag.glsl', import.meta.url).href;
+
 // ---------------------------------------------------------------------------
 // Predicado de cone — ponto p está dentro do cone definido por apex+axis?
 // ---------------------------------------------------------------------------
@@ -132,6 +135,13 @@ VrMaskerScript.prototype.initialize = function () {
             if (this._xrSource === src) this._xrSource = null;
         });
     }
+
+    // Helper visual do cone (runtime). Em fase futura, o mesh virá do Editor.
+    this._coneRoot = null;
+    this._coneVisual = null;
+    this._coneMaterial = null;
+    this._coneColor = new pc.Color(0.2, 0.8, 1.0, 0.22);
+    this._initConeHelper();
 };
 
 VrMaskerScript.prototype.setSplatEntity = function (entity) {
@@ -157,6 +167,85 @@ VrMaskerScript.prototype.update = function (dt) {
         if (this.autoSendOnStop) {
             this._sendToBridge();
         }
+    }
+
+    this._syncConeHelper(triggerDown);
+};
+
+VrMaskerScript.prototype._initConeHelper = async function () {
+    this._coneRoot = new pc.Entity('ConeHelperRoot');
+    this._coneVisual = new pc.Entity('ConeHelperVisual');
+    this._coneVisual.addComponent('render', { type: 'cone' });
+    this._coneVisual.setLocalEulerAngles(90, 0, 0);
+    this._coneRoot.addChild(this._coneVisual);
+    this.app.root.addChild(this._coneRoot);
+    this._coneRoot.enabled = false;
+
+    try {
+        const [vert, frag] = await Promise.all([
+            fetch(CONE_SHADER_VERT_URL).then(r => r.text()),
+            fetch(CONE_SHADER_FRAG_URL).then(r => r.text())
+        ]);
+
+        const mat = new pc.ShaderMaterial({
+            uniqueName: 'VrMaskerConeShader',
+            vertexGLSL: vert,
+            fragmentGLSL: frag,
+            attributes: {
+                aPosition: pc.SEMANTIC_POSITION
+            }
+        });
+
+        mat.blendType = pc.BLEND_NORMAL;
+        mat.depthWrite = false;
+        mat.cull = pc.CULLFACE_NONE;
+        mat.setParameter('uConeRange', this.coneRange);
+        mat.setParameter('uConeAngleTan', Math.tan(this.coneAngleDeg * Math.PI / 180));
+        mat.setParameter('uConeColor', [this._coneColor.r, this._coneColor.g, this._coneColor.b, this._coneColor.a]);
+
+        const meshInstances = this._coneVisual.render?.meshInstances ?? [];
+        for (const mi of meshInstances) {
+            mi.material = mat;
+        }
+        this._coneMaterial = mat;
+    } catch (err) {
+        // Fallback visual para manter feedback mesmo se shader custom falhar.
+        const fallback = new pc.StandardMaterial();
+        fallback.diffuse = new pc.Color(this._coneColor.r, this._coneColor.g, this._coneColor.b);
+        fallback.opacity = this._coneColor.a;
+        fallback.blendType = pc.BLEND_NORMAL;
+        fallback.depthWrite = false;
+        fallback.cull = pc.CULLFACE_NONE;
+        fallback.update();
+        const meshInstances = this._coneVisual.render?.meshInstances ?? [];
+        for (const mi of meshInstances) {
+            mi.material = fallback;
+        }
+    }
+};
+
+VrMaskerScript.prototype._syncConeHelper = function (isTriggerDown) {
+    if (!this._coneRoot || !this._coneVisual) return;
+
+    this._coneRoot.enabled = isTriggerDown;
+    if (!isTriggerDown) return;
+
+    let position;
+    let rotation;
+    if (this._xrSource) {
+        position = this._xrSource.getPosition();
+        rotation = this._xrSource.getRotation();
+    } else {
+        position = this.entity.getPosition();
+        rotation = this.entity.getRotation();
+    }
+
+    this._coneRoot.setPosition(position);
+    this._coneRoot.setRotation(rotation);
+
+    if (this._coneMaterial) {
+        this._coneMaterial.setParameter('uConeRange', this.coneRange);
+        this._coneMaterial.setParameter('uConeAngleTan', Math.tan(this.coneAngleDeg * Math.PI / 180));
     }
 };
 
