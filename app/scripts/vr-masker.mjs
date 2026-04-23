@@ -173,12 +173,21 @@ VrMaskerScript.prototype.update = function (dt) {
 };
 
 VrMaskerScript.prototype._initConeHelper = async function () {
-    this._coneRoot = new pc.Entity('ConeHelperRoot');
-    this._coneVisual = new pc.Entity('ConeHelperVisual');
-    this._coneVisual.addComponent('render', { type: 'cone' });
-    this._coneVisual.setLocalEulerAngles(90, 0, 0);
-    this._coneRoot.addChild(this._coneVisual);
-    this.app.root.addChild(this._coneRoot);
+    // Prioriza cone criado como asset de cena (ex.: via PlayCanvas Editor).
+    // Convencao: entidade com nome "ConeHelper" e componente render.
+    const sceneCone = this.app.root.findByName('ConeHelper');
+    if (sceneCone?.render) {
+        this._coneRoot = sceneCone;
+        this._coneVisual = sceneCone;
+    } else {
+        this._coneRoot = new pc.Entity('ConeHelperRoot');
+        this._coneVisual = new pc.Entity('ConeHelperVisual');
+        this._coneVisual.addComponent('render', { type: 'cone' });
+        this._coneVisual.setLocalEulerAngles(90, 0, 0);
+        this._coneRoot.addChild(this._coneVisual);
+        this.app.root.addChild(this._coneRoot);
+    }
+
     this._coneRoot.enabled = false;
 
     try {
