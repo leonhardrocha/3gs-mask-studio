@@ -112,6 +112,7 @@ VrMaskerScript.attributes.add('coneAngleDeg', { type: 'number', default: 30 });
 VrMaskerScript.attributes.add('coneRange',    { type: 'number', default: 5 });
 VrMaskerScript.attributes.add('bridgeUrl',    { type: 'string', default: BRIDGE_DEFAULT_URL });
 VrMaskerScript.attributes.add('autoSendOnStop',{ type: 'boolean', default: true });
+VrMaskerScript.attributes.add('selectionChunkSize', { type: 'number', default: 20000 });
 
 VrMaskerScript.prototype.initialize = function () {
     /** @type {pc.Entity|null} */
@@ -120,6 +121,7 @@ VrMaskerScript.prototype.initialize = function () {
     this._selected = new Set();
     this._active = false;       // trigger pressionado
     this._tanAngle = Math.tan(this.coneAngleDeg * Math.PI / 180);
+    this._scanCursor = 0;
 
     // Botão de ativação desktop (Espaço)
     this._keyboard = this.app.keyboard;
@@ -156,6 +158,7 @@ VrMaskerScript.prototype.update = function (dt) {
 
     if (triggerDown && !this._active) {
         this._active = true;
+        this._scanCursor = 0;
     }
 
     if (triggerDown && this._active) {
@@ -300,8 +303,11 @@ VrMaskerScript.prototype._doSelection = function () {
 
     let changed = false;
     const count = splatData.numSplats;
+    const chunkSize = Math.max(1, Math.floor(this.selectionChunkSize || 1));
+    const start = this._scanCursor;
+    const end = Math.min(start + chunkSize, count);
 
-    for (let i = 0; i < count; i++) {
+    for (let i = start; i < end; i++) {
         if (this._selected.has(i)) continue; // já selecionado
 
         p.set(
@@ -316,6 +322,8 @@ VrMaskerScript.prototype._doSelection = function () {
             changed = true;
         }
     }
+
+    this._scanCursor = end >= count ? 0 : end;
 
     if (changed) {
         this.fire('selected:update', this._selected.size);

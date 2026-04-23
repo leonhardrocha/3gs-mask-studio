@@ -206,7 +206,7 @@ void main(void) {
 
 ### Fase 5 — Performance
 
-- [ ] Seleção incremental (chunks) para evitar stutter em VR (> 1M gaussianas).
+- [x] Seleção incremental (chunks) para evitar stutter em VR (> 1M gaussianas).
 - [ ] Web Worker opcional para sorting/seleção fora da thread de renderização.
 
 ---
