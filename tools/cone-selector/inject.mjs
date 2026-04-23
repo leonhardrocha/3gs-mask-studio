@@ -35,6 +35,17 @@ const previewState = {
 
 let previewHookInstalled = false;
 
+// O preview é desenhado no espaço visual do SuperSplat, que usa Y invertido
+// em relação aos valores de coordenada usados nos campos/UI (3GS data-space).
+// A seleção continua no data-space; apenas o glyph é convertido aqui.
+function toPreviewRenderPoint(p) {
+    return [p[0], -p[1], p[2]];
+}
+
+function toPreviewRenderAxis(a) {
+    return norm([a[0], -a[1], a[2]]);
+}
+
 function norm(v) {
     const len = Math.hypot(v[0], v[1], v[2]);
     if (len <= 1e-8) return [0, 0, -1];
@@ -112,8 +123,8 @@ function drawPreviewCone() {
     if (!scene || !app) return;
 
     const { positions, colors } = buildConeLineArrays(
-        previewState.apex,
-        previewState.axis,
+        toPreviewRenderPoint(previewState.apex),
+        toPreviewRenderAxis(previewState.axis),
         previewState.angleDeg,
         previewState.range
     );

@@ -90,7 +90,23 @@ Observações:
 
 Abra três terminais.
 
+Antes de rodar qualquer comando Node/npm, confirme o diretório atual em cada terminal.
+
+Comando de verificação (PowerShell):
+
+```powershell
+Get-Location
+```
+
+Comando de verificação (cmd):
+
+```bat
+cd
+```
+
 ### Terminal 1: Bridge server
+
+Diretório obrigatório: `D:\src\3gs-mask-studio\tools\bridge-server`
 
 ```bash
 cd tools/bridge-server
@@ -105,6 +121,8 @@ curl http://localhost:3001/health
 
 ### Terminal 2: SuperSplat
 
+Diretório obrigatório: `D:\src\3gs-mask-studio\supersplat`
+
 ```bash
 cd supersplat
 npm run develop
@@ -113,6 +131,8 @@ npm run develop
 Abra `http://localhost:3000`.
 
 ### Terminal 3: Servidor estático do workspace
+
+Diretório obrigatório: `D:\src\3gs-mask-studio`
 
 ```bash
 npx --yes serve . -p 8080
@@ -123,6 +143,13 @@ Observações:
 - O arquivo `serve.json` na raiz já habilita CORS (`Access-Control-Allow-Origin: *`) para os arquivos servidos em `http://localhost:8080`.
 - Isso é necessário para que o SuperSplat em `http://localhost:3000` consiga carregar `sample.ply` e outros `.ply` remotos via `?load=`.
 - O comando `npm run develop` existe em `supersplat/package.json`, não na raiz do workspace.
+
+Erros comuns de diretório (e correção):
+
+- Se rodar `npm run develop` na raiz `D:\src\3gs-mask-studio`, vai falhar.
+- Correto: primeiro `cd D:\src\3gs-mask-studio\supersplat`, depois `npm run develop`.
+- Se rodar `npm run start` fora de `tools/bridge-server`, o bridge pode não subir.
+- Correto: `cd D:\src\3gs-mask-studio\tools\bridge-server` e então `npm run start`.
 
 ## Como ativar e usar o plugin VR
 
