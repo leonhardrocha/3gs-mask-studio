@@ -341,5 +341,61 @@ function injectPanel() {
     console.log('[cone-selector] painel injetado com sucesso');
 }
 
+// ---------------------------------------------------------------------------
+// postMessage bridge — permite controle cross-origin a partir do wrapper
+// ---------------------------------------------------------------------------
+window.addEventListener('message', (event) => {
+    // Aceitar apenas mensagens com namespace 'coneSelector'
+    if (!event.data || event.data.ns !== 'coneSelector') return;
+
+    const { cmd, payload, id } = event.data;
+    const reply = (data) => event.source?.postMessage({ ns: 'coneSelectorReply', id, ...data }, '*');
+
+    if (cmd === 'ping') {
+        reply({ ok: true });
+        return;
+    }
+
+    if (cmd === 'select') {
+        const { apex, axis, angleDeg, range, op } = payload;
+        const result = applyConeSeleciton(apex, axis, angleDeg, range, op);
+        reply(result.error ? { error: result.error } : { ok: true, inside: result.inside, total: result.total });
+        return;
+    }
+
+    if (cmd === 'clear') {
+        const scene = window.scene;
+        const splats = scene?.elements?.filter(e => e.splatData) ?? [];
+        if (!splats.length) { reply({ error: 'Nenhum splat.' }); return; }
+        const splat = splats[0];
+        const stateArr = splat.splatData.getProp('state');
+        if (stateArr) for (let i = 0; i < stateArr.length; i++) stateArr[i] &= ~1;
+        if (typeof splat.updateState === 'function') splat.updateState();
+        else if (splat.stateTexture) {
+            const data = splat.stateTexture.lock(); data.set(stateArr); splat.stateTexture.unlock();
+        }
+        scene.forceRender = true;
+        reply({ ok: true });
+        return;
+    }
+
+    if (cmd === 'serialize') {
+        const result = serializeSelectedPly();
+        if (!result) { reply({ error: 'Nenhuma gaussiana selecionada.' }); return; }
+        // Transferir buffer diretamente (zero-copy via Transferable)
+        event.source?.postMessage(
+            { ns: 'coneSelectorReply', id, ok: true, count: result.count, buffer: result.buffer },
+            '*',
+            [result.buffer]
+        );
+        return;
+    }
+
+    if (cmd === 'autoApex') {
+        reply({ ok: true, apex: getDefaultApex() });
+        return;
+    }
+});
+
 // Injetar imediatamente
 injectPanel();

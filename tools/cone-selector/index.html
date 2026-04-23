@@ -208,16 +208,33 @@
 
 <script>
 // ---------------------------------------------------------------------------
-// Acesso ao window do iframe (requer mesma origem ou allow-same-origin)
+// postMessage RPC — única forma segura de falar com iframe cross-origin
 // ---------------------------------------------------------------------------
-function getFrameWindow() {
-    const frame = document.getElementById('supersplat-frame');
-    try {
-        return frame.contentWindow;
-    } catch (e) {
-        setStatus(`Erro de acesso ao iframe: ${e.message}\nVerifique se o SuperSplat está na mesma origem (ou use CORS).`);
-        return null;
-    }
+let _msgId = 0;
+const _pending = new Map(); // id → { resolve, reject, timer }
+
+window.addEventListener('message', (event) => {
+    const d = event.data;
+    if (!d || d.ns !== 'coneSelectorReply') return;
+    const p = _pending.get(d.id);
+    if (!p) return;
+    clearTimeout(p.timer);
+    _pending.delete(d.id);
+    if (d.error) p.reject(new Error(d.error));
+    else p.resolve(d);
+});
+
+function sendCmd(cmd, payload = {}, timeoutMs = 8000) {
+    return new Promise((resolve, reject) => {
+        const id = ++_msgId;
+        const frame = document.getElementById('supersplat-frame');
+        const timer = setTimeout(() => {
+            _pending.delete(id);
+            reject(new Error(`Timeout aguardando resposta de "${cmd}". Injete o Cone Selector primeiro.`));
+        }, timeoutMs);
+        _pending.set(id, { resolve, reject, timer });
+        frame.contentWindow.postMessage({ ns: 'coneSelector', cmd, payload, id }, '*');
+    });
 }
 
 function setStatus(msg) {
@@ -243,40 +260,30 @@ function openWithSplat() {
 }
 
 // ---------------------------------------------------------------------------
-// Injetar inject.mjs via postMessage ou script tag no iframe
+// Injetar inject.mjs no iframe — via bookmarklet URI (funciona cross-origin
+// porque é iniciado pelo próprio iframe context ao navegar para o blob URL)
+// Estratégia: criar blob URL com o código do bookmarklet e navegar no iframe
 // ---------------------------------------------------------------------------
 function injectScript() {
-    const fw = getFrameWindow();
-    if (!fw) return;
-
-    // Tentar injeção direta via DOM (funciona com same-origin)
-    try {
-        const doc = fw.document;
-        const existing = doc.getElementById('cone-selector-panel');
-        if (existing) { existing.remove(); setStatus('Painel removido.'); return; }
-
-        const s = doc.createElement('script');
-        s.type = 'module';
-        // Usar URL absoluta para que o módulo seja carregado corretamente
-        s.src = `http://localhost:8080/tools/cone-selector/inject.mjs?t=${Date.now()}`;
-        doc.head.appendChild(s);
-        setStatus('Script injetado no iframe.');
-    } catch (e) {
-        setStatus(`Não foi possível injetar via DOM (origem diferente?).\nAbra o DevTools no iframe e execute o bookmarklet manualmente.\nErro: ${e.message}`);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Executar funções do inject.mjs via iframe window
-// ---------------------------------------------------------------------------
-function callInFrame(fnName, ...args) {
-    const fw = getFrameWindow();
-    if (!fw) return null;
-    if (typeof fw[fnName] !== 'function') {
-        setStatus(`Função ${fnName} não encontrada. Clique em "Injetar Cone Selector" primeiro.`);
-        return null;
-    }
-    return fw[fnName](...args);
+    // postMessage ping para ver se já está injetado
+    sendCmd('ping', {}, 1500)
+        .then(() => setStatus('Cone Selector já está ativo no iframe.'))
+        .catch(() => {
+            // Não está injetado — informar o usuário com instrução clara
+            const src = `http://localhost:8080/tools/cone-selector/inject.mjs`;
+            setStatus(
+                `Injete manualmente no DevTools do SuperSplat:\n` +
+                `const s=document.createElement('script');s.type='module';` +
+                `s.src='${src}';document.head.appendChild(s);`
+            );
+            // Copiar para clipboard para facilitar
+            navigator.clipboard?.writeText(
+                `const s=document.createElement('script');s.type='module';s.src='${src}';document.head.appendChild(s);`
+            ).then(() => setStatus(
+                `Código copiado para clipboard!\n` +
+                `Abra DevTools no iframe (F12 → Console) e cole com Ctrl+V.`
+            )).catch(() => {});
+        });
 }
 
 function getParams() {
@@ -289,143 +296,46 @@ function getParams() {
 }
 
 // ---------------------------------------------------------------------------
-// Executar seleção por cone via window.scene do iframe
+// Ações via postMessage RPC
 // ---------------------------------------------------------------------------
-function doSelect() {
-    const fw = getFrameWindow();
-    if (!fw) return;
-    const { apex, axis, angleDeg, range, op } = getParams();
-
-    // Tentar usar a função exposta pelo inject.mjs (se já injetado)
-    if (typeof fw.coneSelectApply === 'function') {
-        const r = fw.coneSelectApply(apex, axis, angleDeg, range, op);
-        setStatus(r.error ? `Erro: ${r.error}` : `✓ ${r.inside}/${r.total} gaussianas (${op})`);
-        return;
-    }
-
-    // Fallback: executar inline via eval (requer same-origin)
+async function doSelect() {
+    setStatus('Selecionando...');
     try {
-        const scene = fw.scene;
-        if (!scene) { setStatus('window.scene não encontrado no iframe.'); return; }
-        const splats = scene.elements.filter(e => e.splatData);
-        if (!splats.length) { setStatus('Nenhum splat no iframe.'); return; }
-
-        const splat = splats[0];
-        const { splatData } = splat;
-        const x = splatData.getProp('x');
-        const y = splatData.getProp('y');
-        const z = splatData.getProp('z');
-        const stateArr = splatData.getProp('state');
-        if (!x) { setStatus('Propriedades x/y/z não encontradas.'); return; }
-
-        const len = Math.sqrt(axis.reduce((s,v) => s + v*v, 0));
-        const normAxis = len > 0 ? axis.map(v => v / len) : [0, 0, -1];
-        const tanA = Math.tan(angleDeg * Math.PI / 180);
-        let count = 0;
-        for (let i = 0; i < splatData.numSplats; i++) {
-            const dx = x[i]-apex[0], dy = y[i]-apex[1], dz = z[i]-apex[2];
-            const t = dx*normAxis[0]+dy*normAxis[1]+dz*normAxis[2];
-            const inside = t > 0 && t < range &&
-                (dx-t*normAxis[0])**2+(dy-t*normAxis[1])**2+(dz-t*normAxis[2])**2 <= (t*tanA)**2;
-            if (stateArr) {
-                const d = (stateArr[i] & 2) !== 0, lk = (stateArr[i] & 4) !== 0;
-                if (!d && !lk) {
-                    if (op === 'set') stateArr[i] = inside ? 1 : 0;
-                    else if (op === 'add' && inside) stateArr[i] |= 1;
-                    else if (op === 'remove' && inside) stateArr[i] &= ~1;
-                }
-            }
-            if (inside) count++;
-        }
-        // Update state texture
-        if (typeof splat.updateState === 'function') splat.updateState();
-        else if (splat.stateTexture) {
-            const data = splat.stateTexture.lock();
-            data.set(stateArr);
-            splat.stateTexture.unlock();
-        }
-        scene.forceRender = true;
-        setStatus(`✓ ${count}/${splatData.numSplats} gaussianas (${op})`);
-    } catch (e) {
-        setStatus(`Erro: ${e.message}`);
-    }
+        const r = await sendCmd('select', getParams());
+        setStatus(`✓ ${r.inside}/${r.total} gaussianas (${getParams().op})`);
+    } catch (e) { setStatus(`Erro: ${e.message}`); }
 }
 
-function doClear() {
-    const fw = getFrameWindow();
-    if (!fw) return;
+async function doClear() {
+    setStatus('Limpando...');
     try {
-        const scene = fw.scene;
-        const splats = scene?.elements?.filter(e => e.splatData) ?? [];
-        if (!splats.length) { setStatus('Nenhum splat.'); return; }
-        const splat = splats[0];
-        const stateArr = splat.splatData.getProp('state');
-        if (stateArr) for (let i = 0; i < stateArr.length; i++) stateArr[i] &= ~1;
-        if (typeof splat.updateState === 'function') splat.updateState();
-        else if (splat.stateTexture) {
-            const data = splat.stateTexture.lock(); data.set(stateArr); splat.stateTexture.unlock();
-        }
-        scene.forceRender = true;
+        await sendCmd('clear');
         setStatus('Seleção limpa.');
     } catch (e) { setStatus(`Erro: ${e.message}`); }
 }
 
 async function doSend() {
-    const fw = getFrameWindow();
-    if (!fw) return;
     setStatus('Serializando...');
     try {
-        const scene = fw.scene;
-        const splats = scene?.elements?.filter(e => e.splatData) ?? [];
-        if (!splats.length) { setStatus('Nenhum splat.'); return; }
-        const splat = splats[0];
-        const { splatData } = splat;
-        const props = ['x','y','z','f_dc_0','f_dc_1','f_dc_2','scale_0','scale_1','scale_2',
-                       'rot_0','rot_1','rot_2','rot_3','opacity'];
-        const available = props.filter(p => splatData.getProp(p) != null);
-        const arrays = available.map(p => splatData.getProp(p));
-        const stateArr = splatData.getProp('state');
-        const n = splatData.numSplats;
-        const selected = [];
-        for (let i = 0; i < n; i++) {
-            if (!stateArr || (stateArr[i] & 1) !== 0) selected.push(i);
-        }
-        if (!selected.length) { setStatus('Nenhuma gaussiana selecionada.'); return; }
-        setStatus(`Serializando ${selected.length} gaussianas...`);
-        const propLines = available.map(p => `property float ${p}`).join('\n');
-        const header = `ply\nformat binary_little_endian 1.0\nelement vertex ${selected.length}\n${propLines}\nend_header\n`;
-        const headerBytes = new TextEncoder().encode(header);
-        const stride = available.length * 4;
-        const body = new Uint8Array(selected.length * stride);
-        const view = new DataView(body.buffer);
-        for (let si = 0; si < selected.length; si++) {
-            const i = selected[si];
-            for (let j = 0; j < arrays.length; j++)
-                view.setFloat32((si * available.length + j) * 4, arrays[j][i], true);
-        }
-        const blob = new Uint8Array(headerBytes.length + body.length);
-        blob.set(headerBytes); blob.set(body, headerBytes.length);
+        // 1. Serializar no contexto do iframe (onde os dados estão)
+        const r = await sendCmd('serialize', {}, 15000);
+        setStatus(`Enviando ${r.count} gaussianas ao Bridge...`);
+
+        // 2. Enviar ao bridge a partir desta origem (sem restrição cross-origin)
         const bridgeUrl = document.getElementById('bridge-url').value.trim();
         const form = new FormData();
-        form.append('file', new Blob([blob.buffer], { type: 'application/octet-stream' }), 'selected.ply');
+        form.append('file', new Blob([r.buffer], { type: 'application/octet-stream' }), 'selected.ply');
         const resp = await fetch(bridgeUrl, { method: 'POST', body: form });
         const json = await resp.json();
         setStatus(json.ok ? `Bridge OK — ${json.outputBytes} bytes` : `Bridge erro: ${json.error ?? JSON.stringify(json)}`);
     } catch (e) { setStatus(`Erro: ${e.message}`); }
 }
 
-function autoApex() {
-    const fw = getFrameWindow();
-    if (!fw) return;
+async function autoApex() {
     try {
-        const splats = fw.scene?.elements?.filter(e => e.splatData) ?? [];
-        if (!splats.length) { setStatus('Nenhum splat no iframe.'); return; }
-        const bound = splats[0].worldBound ?? splats[0].localBoundStorage;
-        if (!bound) { setStatus('Bound não disponível.'); return; }
-        const { center, halfExtents } = bound;
-        const apex = [center.x, center.y + halfExtents.y, center.z + halfExtents.z * 0.5];
-        document.getElementById('cs-apex').value = apex.map(v => v.toFixed(3)).join(' ');
-        setStatus(`Ápice automático: ${apex.map(v => v.toFixed(3)).join(', ')}`);
+        const r = await sendCmd('autoApex');
+        document.getElementById('cs-apex').value = r.apex.map(v => parseFloat(v).toFixed(3)).join(' ');
+        setStatus(`Ápice automático: ${r.apex.map(v => parseFloat(v).toFixed(3)).join(', ')}`);
     } catch (e) { setStatus(`Erro: ${e.message}`); }
 }
 </script>
