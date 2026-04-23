@@ -201,8 +201,8 @@ void main(void) {
 
 ### Fase 4 — Pipeline completo
 
-- [ ] Round-trip validado: seleção VR → PLY exportado → bridge → `splat-transform` → artefato.
-- [ ] Testes: `cone-math`, `ply-exporter`, `round-trip` em `tools/bridge-server`.
+- [x] Round-trip validado: seleção VR → PLY exportado → bridge → `splat-transform` → artefato.
+- [x] Testes: `cone-math`, `ply-exporter`, `round-trip` em `tools/bridge-server`.
 
 ### Fase 5 — Performance
 
