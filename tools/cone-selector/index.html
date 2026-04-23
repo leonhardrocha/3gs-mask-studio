@@ -144,7 +144,7 @@
     <div class="section">
       <label>URL SuperSplat</label>
       <div id="splat-url-bar">
-        <input id="supersplat-url" type="text" value="http://localhost:8080/supersplat/dist/index.html" />
+        <input id="supersplat-url" type="text" value="http://localhost:8080/supersplat/dist/" />
         <button onclick="loadSuperSplat()">▶</button>
       </div>
       <label>Splat URL (para carregar via ?load=)</label>
@@ -196,7 +196,7 @@
 
   <!-- Área do iframe SuperSplat -->
   <div id="frame-wrap">
-    <iframe id="supersplat-frame" src="http://localhost:8080/supersplat/dist/index.html"
+    <iframe id="supersplat-frame" src="http://localhost:8080/supersplat/dist/"
       allow="xr-spatial-tracking; camera; microphone"
       sandbox="allow-scripts allow-same-origin allow-forms allow-popups">
     </iframe>
@@ -256,26 +256,30 @@ function getFrameDocument() {
 // ---------------------------------------------------------------------------
 function loadSuperSplat() {
   const raw = document.getElementById('supersplat-url').value.trim();
-  const url = raw || `${window.location.origin}/supersplat/dist/index.html`;
+  const url = normalizeSupersplatUrl(raw || `${window.location.origin}/supersplat/dist/`);
     document.getElementById('supersplat-frame').src = url;
     setStatus(`Carregando: ${url}`);
 }
 
 function normalizeSupersplatUrl(rawUrl) {
-  const fallback = `${window.location.origin}/supersplat/dist/index.html`;
+  const fallback = `${window.location.origin}/supersplat/dist/`;
   const trimmed = (rawUrl || '').trim();
   if (!trimmed) return fallback;
 
   try {
     const u = new URL(trimmed, window.location.origin);
-    if (u.pathname.endsWith('/')) {
-      u.pathname += 'index.html';
-    } else if (!u.pathname.endsWith('/index.html')) {
+
+    if (u.pathname.endsWith('/index.html')) {
+      u.pathname = u.pathname.slice(0, -'index.html'.length);
+    }
+
+    if (!u.pathname.endsWith('/')) {
       const lastSegment = u.pathname.split('/').pop() || '';
       if (!lastSegment.includes('.')) {
-        u.pathname += '/index.html';
+        u.pathname += '/';
       }
     }
+
     return u.toString();
   } catch (_e) {
     return fallback;
