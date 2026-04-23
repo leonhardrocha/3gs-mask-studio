@@ -276,10 +276,10 @@ MASK_OUTPUT_EXT=.ply
 
 ### Fase 7 — Política de saída e export
 
-- [ ] Implementar nome de saída com sufixo `_output` sobre o basename de entrada.
-- [ ] Tornar sufixo/extensão configuráveis por ambiente (`MASK_OUTPUT_SUFFIX`, `MASK_OUTPUT_EXT`).
-- [ ] Garantir `-w/--overwrite` em todos os comandos para evitar falhas por arquivo existente.
-- [ ] Cobrir com testes de contrato: nome final, encadeamento e fallback legado.
+- [x] Implementar nome de saída com sufixo `_output` sobre o basename de entrada.
+- [x] Tornar sufixo/extensão configuráveis por ambiente (`MASK_OUTPUT_SUFFIX`, `MASK_OUTPUT_EXT`).
+- [x] Garantir `-w/--overwrite` em todos os comandos para evitar falhas por arquivo existente.
+- [x] Cobrir com testes de contrato: nome final, encadeamento e fallback legado.
 
 ---
 

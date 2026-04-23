@@ -170,6 +170,59 @@ describe('bridge pipeline', () => {
             assert.equal(Array.isArray(json.steps), true);
             assert.equal(json.steps.length, 3, 'pipeline should execute 3 steps');
             assert.ok(fs.existsSync(json.outputPath), 'final output should exist');
+            assert.match(json.outputPath, /scene_output\.ply$/i, 'default suffix should be _output');
+        });
+    });
+
+    it('uses configurable output suffix and extension', async () => {
+        const env = {
+            PORT: '3194',
+            SELECT_CLI_CMD: `${process.execPath} "${ST_CLI}" -w {input} {selected}`,
+            MASK_CLI_CMD: `${process.execPath} "${ST_CLI}" -w {selected} {masked}`,
+            EXPORT_CLI_CMD: `${process.execPath} "${ST_CLI}" -w {masked} {output}`,
+            MASK_OUTPUT_SUFFIX: '_filtered',
+            MASK_OUTPUT_EXT: '.bin.ply',
+            MASK_KEEP_TEMP: 'true'
+        };
+
+        await withServer(env, async (port) => {
+            const response = await fetch(`http://127.0.0.1:${port}/process-mask`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/octet-stream',
+                    'x-input-filename': 'my-scene.ply'
+                },
+                body: buildValidPly()
+            });
+
+            const text = await response.text();
+            assert.equal(response.status, 200, text);
+            const json = JSON.parse(text);
+            assert.equal(json.ok, true);
+            assert.match(json.outputPath, /my-scene_filtered\.bin\.ply$/i);
+        });
+    });
+
+    it('rejects commands without overwrite flag', async () => {
+        const env = {
+            PORT: '3195',
+            SELECT_CLI_CMD: `${process.execPath} "${ST_CLI}" {input} {selected}`,
+            MASK_CLI_CMD: `${process.execPath} "${ST_CLI}" -w {selected} {masked}`,
+            EXPORT_CLI_CMD: `${process.execPath} "${ST_CLI}" -w {masked} {output}`
+        };
+
+        await withServer(env, async (port) => {
+            const response = await fetch(`http://127.0.0.1:${port}/process-mask`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: buildValidPly()
+            });
+
+            const text = await response.text();
+            assert.equal(response.status, 400, text);
+            const json = JSON.parse(text);
+            assert.equal(json.ok, false);
+            assert.match(json.error, /must include -w or --overwrite/i);
         });
     });
 });
