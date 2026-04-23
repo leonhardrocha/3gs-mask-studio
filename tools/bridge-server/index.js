@@ -4,6 +4,14 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 
+// Carrega variaveis de ambiente do arquivo local .env quando disponivel.
+if (typeof process.loadEnvFile === 'function') {
+  const envPath = path.join(__dirname, '.env');
+  if (fs.existsSync(envPath)) {
+    process.loadEnvFile(envPath);
+  }
+}
+
 const app = express();
 
 const port = Number(process.env.PORT || 3001);
