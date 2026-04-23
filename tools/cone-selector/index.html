@@ -323,9 +323,14 @@ async function doSend() {
 
         // 2. Enviar ao bridge a partir desta origem (sem restrição cross-origin)
         const bridgeUrl = document.getElementById('bridge-url').value.trim();
-        const form = new FormData();
-        form.append('file', new Blob([r.buffer], { type: 'application/octet-stream' }), 'selected.ply');
-        const resp = await fetch(bridgeUrl, { method: 'POST', body: form });
+    const resp = await fetch(bridgeUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'x-input-filename': 'selected.ply'
+      },
+      body: r.buffer
+    });
         const json = await resp.json();
         setStatus(json.ok ? `Bridge OK — ${json.outputBytes} bytes` : `Bridge erro: ${json.error ?? JSON.stringify(json)}`);
     } catch (e) { setStatus(`Erro: ${e.message}`); }

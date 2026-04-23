@@ -177,9 +177,14 @@ async function sendToBridge(statusEl, apex, axis, angleDeg, range) {
     }
     statusEl.textContent = `Enviando ${result.count} gaussianas...`;
     try {
-        const form = new FormData();
-        form.append('file', new Blob([result.buffer], { type: 'application/octet-stream' }), 'selected.ply');
-        const resp = await fetch(BRIDGE_URL, { method: 'POST', body: form });
+        const resp = await fetch(BRIDGE_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                'x-input-filename': 'selected.ply'
+            },
+            body: result.buffer
+        });
         const json = await resp.json();
         if (json.ok) {
             statusEl.textContent = `Bridge OK — ${json.outputBytes} bytes`;
