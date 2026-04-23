@@ -283,6 +283,224 @@ MASK_OUTPUT_EXT=.ply
 
 ---
 
+## Análise — Problemas de renderização e ferramenta de seleção
+
+> Diagnóstico realizado após teste manual do fluxo descrito no README. Os
+> comandos CLI funcionam (bridge validado em HTTP), mas o viewer não renderiza
+> e não há ferramenta de seleção por cone visível.
+
+### Raiz dos problemas identificados
+
+#### Problema 1 — `app/main.mjs` usa a API legada `pc.Application`
+
+A engine PlayCanvas tem duas superfícies de API:
+
+| API | Status | Suporte GSplat |
+|-----|--------|----------------|
+| `pc.Application(canvas, opts)` | **Legada** — ainda presente mas não registra sistemas automaticamente | Não registra `GSplatComponentSystem` por padrão |
+| `pc.AppBase` + `pc.AppOptions` | **Atual** — usada por todos os exemplos oficiais | Exige registro explícito de `GSplatComponentSystem` e `GSplatHandler` |
+
+O `app/main.mjs` atual cria `new pc.Application(canvas, {...})` sem registrar
+os sistemas de GSplat. Mesmo que o arquivo `.ply` seja carregado, a engine não
+sabe renderizá-lo porque `GSplatComponentSystem` está ausente.
+
+**Evidência**: todos os exemplos em `engine/examples/src/examples/gaussian-splatting/`
+usam o padrão:
+
+```js
+const createOptions = new pc.AppOptions();
+createOptions.graphicsDevice = device;
+createOptions.componentSystems = [
+    pc.RenderComponentSystem,
+    pc.CameraComponentSystem,
+    pc.GSplatComponentSystem    // ← obrigatório
+];
+createOptions.resourceHandlers = [
+    pc.TextureHandler,
+    pc.ContainerHandler,
+    pc.GSplatHandler            // ← obrigatório para carregar .ply como gsplat
+];
+const app = new pc.AppBase(canvas);
+app.init(createOptions);
+```
+
+Referência: `engine/examples/src/examples/gaussian-splatting/simple.example.mjs`
+
+#### Problema 2 — SuperSplat não tem ferramenta de seleção por cone
+
+O SuperSplat (`supersplat/`) já tem ferramentas de seleção em sua barra inferior:
+rect, brush, flood, polygon, lasso, sphere, box, eyedropper. Porém:
+
+- Não existe ferramenta de seleção por **cone** (volume frustum 3D).
+- Não existe integração nativa com o bridge server para envio do PLY selecionado.
+- O `ToolManager` interno (`supersplat/src/tools/tool-manager.ts`) **não é exposto
+  globalmente** — apenas `window.scene` é exposto.
+
+**O SuperSplat renderiza normalmente** quando um arquivo `.ply` é carregado
+(drag-drop ou parâmetro `?load=<url>`). O canvas aparece vazio porque nenhum
+arquivo está carregado por padrão.
+
+#### Problema 3 — Dois "viewers" concorrentes sem separação clara de papel
+
+O README orienta a usar o SuperSplat como visualizador, mas o `app/` standalone
+foi criado como a surface primária do produto (fases 2–5). Essa ambiguidade
+causa confusão sobre onde a ferramenta de cone deve viver.
+
+---
+
+### Estratégia de extensão do SuperSplat sem alterar fonte
+
+O SuperSplat expõe `window.scene` em tempo de execução. A partir desse objeto
+é possível:
+
+```js
+// Acessível pelo console do navegador ou por script injetado
+const { events } = window.scene;
+
+// Disparar seleção por esfera em coordenadas de mundo
+events.fire('select.bySphere', 'add', [cx, cy, cz, radius]);
+
+// Disparar seleção por box alinhada ao eixo
+events.fire('select.byBox', 'set', [cx, cy, cz, lenX, lenY, lenZ]);
+
+// Limpar seleção
+events.fire('select.none');
+
+// Acessar dados brutos dos splats
+const splat = window.scene.elements[0];        // primeiro GSplat carregado
+const x = splat.splatData.getProp('x');        // Float32Array das posições X
+const y = splat.splatData.getProp('y');
+const z = splat.splatData.getProp('z');
+const state = splat.splatData.getProp('state'); // Uint8Array: 0=unselected, 1=selected, 2=deleted
+```
+
+Isso abre duas vias de extensão sem alterar `supersplat/src/`:
+
+**Via A — Bookmarklet / snippet de console**
+
+Um script `.mjs` em `tools/cone-selector/inject.mjs` que, quando executado no
+contexto da página SuperSplat, injeta um painel flutuante na DOM com controles
+de cone e chama `events.fire('select.bySphere', ...)` N vezes ao longo do eixo
+do cone para aproximar a seleção cônica.
+
+```
+Vantagem : não requer build, funciona com qualquer versão do SuperSplat.
+Limitação: aproximação por esferas não é cone exato; número de esferas
+           ≈ range / (radius_médio) afeta precisão vs. performance.
+```
+
+**Via B — Manipulação direta do array `state` (cone exato)**
+
+Pelo acesso a `splat.splatData.getProp('state')` + `splat.updateState()` é
+possível aplicar o predicado de cone exato (mesma função de `select-cone.mjs`)
+diretamente nos dados do splat carregado no SuperSplat, sem usar os eventos de
+seleção interna.
+
+```js
+// Pseudo-código do snippet de console
+const splat = window.scene.elements[0];
+const x = splat.splatData.getProp('x');
+const y = splat.splatData.getProp('y');
+const z = splat.splatData.getProp('z');
+const state = splat.splatData.getProp('state');
+
+const apex = { x: 0.07, y: 0.25, z: 0.41 };
+const axis = { x: -0.22, y: -0.44, z: -0.87 };
+const tanA = Math.tan(30 * Math.PI / 180);
+const range = 5;
+
+for (let i = 0; i < splat.numSplats; i++) {
+    const dx = x[i] - apex.x, dy = y[i] - apex.y, dz = z[i] - apex.z;
+    const t = dx * axis.x + dy * axis.y + dz * axis.z;
+    if (t > 0 && t < range) {
+        const rx = dx - t * axis.x, ry = dy - t * axis.y, rz = dz - t * axis.z;
+        if ((rx*rx + ry*ry + rz*rz) < (t * tanA) ** 2) state[i] |= 1; // marca selecionado
+    }
+}
+splat.updateState();              // sobe texture — gaussianas ficam destacadas na UI
+window.scene.forceRender = true;
+```
+
+> **Verificar** se `splat.updateState()` é método público acessível no build
+> produção. Se não for, a alternativa é forçar upload manual:
+> `splat.stateTexture.lock()` → modificar → `splat.stateTexture.unlock()`.
+
+**Via C — Página wrapper com iframe (integração ponte)**
+
+Uma página HTML (`tools/cone-selector/index.html`) que:
+
+1. Incorpora SuperSplat em um `<iframe src="http://localhost:3000">`.
+2. Adiciona painel de cone na página pai.
+3. Usa `contentWindow.window.scene` para executar o snippet da Via B.
+4. Após seleção, serializa o PLY das gaussianas selecionadas e envia ao bridge.
+
+```
+Vantagem : UI separada, não altera SuperSplat, pode ter painel completo.
+Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
+           que SuperSplat permita cross-origin scripts — verificar CSP do build.
+```
+
+---
+
+### Fase 8 — Corrigir renderização GSplat no `app/` standalone
+
+- [x] Reescrever `app/main.mjs` para usar `pc.AppBase` + `pc.AppOptions`.
+- [x] Registrar explicitamente `pc.GSplatComponentSystem` e `pc.GSplatHandler`.
+- [x] Usar `createGraphicsDevice()` (assíncrono) antes de criar `AppBase`.
+- [x] Substituir `app.assets.loadFromUrl` por `Asset` + `app.assets.load` (padrão atual).
+- [x] Adicionar câmera de órbita (`camera-controls.mjs`) para facilitar inspeção do splat.
+- [x] Adicionar `importmap` em `app/index.html` para resolver o bare specifier `'playcanvas'`.
+- [x] Verificar passo a passo:
+  ```bash
+  npx --yes serve . -p 8080
+  # abrir: http://localhost:8080/app/?splat=http://localhost:8080/tools/bridge-server/sample.ply
+  # esperado: splat visível no canvas, UI de overlay exibindo "Splat carregado"
+  ```
+
+**Commit**: d851842
+
+---
+
+### Fase 9 — Ferramenta de cone no SuperSplat (sem modificar fonte)
+
+- [x] Criar `tools/cone-selector/inject.mjs` com:
+  - Painel flutuante com campos: apex, axis, angle, range, op.
+  - Predicado de cone exato aplicado em `splatData.getProp('x/y/z/state')`.
+  - Suporte a `splat.updateState()` com fallback para `stateTexture` lock/unlock.
+  - Botão "Selecionar" → aplica cone e destaca gaussianas na UI do SuperSplat.
+  - Botão "Limpar" → remove seleção atual.
+  - Botão "Enviar ao Bridge" → serializa PLY binário e POST `/process-mask`.
+- [x] Criar `tools/cone-selector/bookmarklet.js` com código do bookmarklet.
+- [x] Testar:
+  ```
+  http://localhost:3000/?load=http://localhost:8080/tools/bridge-server/sample.ply
+  # Abrir DevTools → Console → injetar script:
+  const s=document.createElement('script');s.type='module';
+  s.src='http://localhost:8080/tools/cone-selector/inject.mjs';
+  document.head.appendChild(s);
+  # Esperado: painel "Cone Selector" aparece no canto superior direito
+  ```
+
+**Commit**: ac0b45b
+
+---
+
+### Fase 10 — Página wrapper integrada
+
+- [x] Criar `tools/cone-selector/index.html` com:
+  - Layout de duas colunas: sidebar de controle + iframe com SuperSplat.
+  - Campo para URL do SuperSplat e URL do splat a carregar (`?load=`).
+  - Todos os controles de cone (apex, axis, angle, range, op) no sidebar.
+  - Botões Selecionar / Limpar / Enviar ao Bridge.
+  - Lógica de acesso a `iframe.contentWindow.scene` (mesmo quando same-origin).
+  - Fallback: botão "Injetar Cone Selector" para injeção via DOM do iframe.
+  - Campo configurável para Bridge URL.
+- [x] Testar em `http://localhost:8080/tools/cone-selector/` com SuperSplat em `http://localhost:3000`.
+
+**Commit**: ver próximo
+
+---
+
 ## Referências
 
 - Engine GSplat API: https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/
@@ -291,3 +509,5 @@ MASK_OUTPUT_EXT=.ply
 - Multi-splat vertex shader: `engine/examples/src/examples/gaussian-splatting/multi-splat.shader.glsl.vert`
 - XR controllers script: `engine/scripts/esm/xr-controllers.mjs`
 - PlayCanvas Editor: https://github.com/playcanvas/editor
+- SuperSplat `window.scene` API (inferida do código): `supersplat/src/scene.ts`, `supersplat/src/splat.ts`
+- `pc.AppBase` exemplo oficial: `engine/examples/src/examples/gaussian-splatting/simple.example.mjs`

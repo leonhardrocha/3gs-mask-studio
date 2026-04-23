@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3GS Cone Selector — Wrapper</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a12; font-family: monospace; font-size: 12px; color: #e0e0e0; }
+
+    #layout {
+      display: flex;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    #sidebar {
+      width: 240px;
+      flex-shrink: 0;
+      background: rgba(15,15,25,0.97);
+      border-right: 1px solid rgba(100,180,255,0.2);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      z-index: 10;
+    }
+
+    #sidebar header {
+      padding: 12px 14px 8px;
+      font-size: 13px;
+      font-weight: bold;
+      color: #7dd3fc;
+      border-bottom: 1px solid rgba(100,180,255,0.15);
+    }
+
+    .section {
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+
+    label {
+      display: block;
+      color: #94a3b8;
+      margin-bottom: 3px;
+      font-size: 11px;
+    }
+
+    input[type="text"], select {
+      width: 100%;
+      background: #0a0a18;
+      color: #e0e0e0;
+      border: 1px solid #334;
+      border-radius: 3px;
+      padding: 4px 6px;
+      font-family: monospace;
+      font-size: 11px;
+      margin-bottom: 6px;
+    }
+
+    input[type="range"] { width: 100%; margin: 3px 0 6px; cursor: pointer; }
+
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 6px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: monospace;
+      font-size: 11px;
+      margin-bottom: 5px;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-blue   { background: #1d4ed8; color: #fff; }
+    .btn-green  { background: #059669; color: #fff; }
+    .btn-gray   { background: #374151; color: #fff; }
+    .btn-red    { background: #991b1b; color: #fff; }
+
+    #status {
+      font-size: 10px;
+      color: #94a3b8;
+      min-height: 32px;
+      padding: 8px 14px;
+      word-break: break-all;
+      border-top: 1px solid rgba(255,255,255,0.05);
+    }
+
+    #splat-url-bar {
+      display: flex;
+      gap: 4px;
+      padding: 6px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    #splat-url-bar input {
+      flex: 1;
+      margin: 0;
+    }
+    #splat-url-bar button {
+      flex-shrink: 0;
+      padding: 4px 8px;
+      background: #1e3a5f;
+      color: #7dd3fc;
+      border: 1px solid #334;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+
+    #frame-wrap {
+      flex: 1;
+      position: relative;
+    }
+
+    #supersplat-frame {
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+
+    #inject-btn-overlay {
+      position: absolute;
+      bottom: 12px;
+      right: 12px;
+      padding: 6px 12px;
+      background: rgba(29,78,216,0.85);
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-family: monospace;
+      font-size: 11px;
+      z-index: 20;
+    }
+  </style>
+</head>
+<body>
+<div id="layout">
+  <!-- Painel lateral de controle -->
+  <div id="sidebar">
+    <header>🔵 Cone Selector</header>
+
+    <!-- URL do SuperSplat + carregamento de splat -->
+    <div class="section">
+      <label>URL SuperSplat</label>
+      <div id="splat-url-bar">
+        <input id="supersplat-url" type="text" value="http://localhost:3000" />
+        <button onclick="loadSuperSplat()">▶</button>
+      </div>
+      <label>Splat URL (para carregar via ?load=)</label>
+      <input id="splat-url" type="text"
+        value="http://localhost:8080/tools/bridge-server/sample.ply"
+        placeholder="http://...sample.ply" />
+      <button class="btn btn-gray" onclick="openWithSplat()">Abrir com splat</button>
+    </div>
+
+    <!-- Parâmetros do cone -->
+    <div class="section">
+      <label>Ápice (x y z)</label>
+      <input id="cs-apex" type="text" value="0 0 3" />
+      <button class="btn btn-gray" id="auto-apex-btn" onclick="autoApex()">
+        Auto (centro do splat)
+      </button>
+      <label>Eixo (x y z)</label>
+      <input id="cs-axis" type="text" value="0 0 -1" />
+      <label>Ângulo: <span id="angle-val">30</span>°</label>
+      <input id="cs-angle" type="range" min="1" max="90" value="30"
+        oninput="document.getElementById('angle-val').textContent=this.value" />
+      <label>Range: <span id="range-val">5.0</span> m</label>
+      <input id="cs-range" type="range" min="0.1" max="20" step="0.1" value="5"
+        oninput="document.getElementById('range-val').textContent=parseFloat(this.value).toFixed(1)" />
+      <label>Operação</label>
+      <select id="cs-op">
+        <option value="add">Add</option>
+        <option value="set">Set</option>
+        <option value="remove">Remove</option>
+      </select>
+    </div>
+
+    <!-- Ações -->
+    <div class="section">
+      <button class="btn btn-blue" onclick="doSelect()">Selecionar</button>
+      <button class="btn btn-gray" onclick="doClear()">Limpar seleção</button>
+      <button class="btn btn-green" onclick="doSend()">Enviar ao Bridge</button>
+    </div>
+
+    <!-- Bridge URL -->
+    <div class="section">
+      <label>Bridge URL</label>
+      <input id="bridge-url" type="text" value="http://localhost:3001/process-mask" />
+    </div>
+
+    <!-- Status -->
+    <div id="status">Pronto.</div>
+  </div>
+
+  <!-- Área do iframe SuperSplat -->
+  <div id="frame-wrap">
+    <iframe id="supersplat-frame" src="http://localhost:3000"
+      allow="xr-spatial-tracking; camera; microphone"
+      sandbox="allow-scripts allow-same-origin allow-forms allow-popups">
+    </iframe>
+    <button id="inject-btn-overlay" onclick="injectScript()">
+      Injetar Cone Selector
+    </button>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Acesso ao window do iframe (requer mesma origem ou allow-same-origin)
+// ---------------------------------------------------------------------------
+function getFrameWindow() {
+    const frame = document.getElementById('supersplat-frame');
+    try {
+        return frame.contentWindow;
+    } catch (e) {
+        setStatus(`Erro de acesso ao iframe: ${e.message}\nVerifique se o SuperSplat está na mesma origem (ou use CORS).`);
+        return null;
+    }
+}
+
+function setStatus(msg) {
+    document.getElementById('status').textContent = msg;
+    console.log('[wrapper]', msg);
+}
+
+// ---------------------------------------------------------------------------
+// Carregar SuperSplat no iframe
+// ---------------------------------------------------------------------------
+function loadSuperSplat() {
+    const url = document.getElementById('supersplat-url').value.trim();
+    document.getElementById('supersplat-frame').src = url;
+    setStatus(`Carregando: ${url}`);
+}
+
+function openWithSplat() {
+    const base = document.getElementById('supersplat-url').value.trim().replace(/\/$/, '');
+    const splat = document.getElementById('splat-url').value.trim();
+    const url = `${base}?load=${encodeURIComponent(splat)}`;
+    document.getElementById('supersplat-frame').src = url;
+    setStatus(`Abrindo SuperSplat com splat: ${splat}`);
+}
+
+// ---------------------------------------------------------------------------
+// Injetar inject.mjs via postMessage ou script tag no iframe
+// ---------------------------------------------------------------------------
+function injectScript() {
+    const fw = getFrameWindow();
+    if (!fw) return;
+
+    // Tentar injeção direta via DOM (funciona com same-origin)
+    try {
+        const doc = fw.document;
+        const existing = doc.getElementById('cone-selector-panel');
+        if (existing) { existing.remove(); setStatus('Painel removido.'); return; }
+
+        const s = doc.createElement('script');
+        s.type = 'module';
+        // Usar URL absoluta para que o módulo seja carregado corretamente
+        s.src = `http://localhost:8080/tools/cone-selector/inject.mjs?t=${Date.now()}`;
+        doc.head.appendChild(s);
+        setStatus('Script injetado no iframe.');
+    } catch (e) {
+        setStatus(`Não foi possível injetar via DOM (origem diferente?).\nAbra o DevTools no iframe e execute o bookmarklet manualmente.\nErro: ${e.message}`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Executar funções do inject.mjs via iframe window
+// ---------------------------------------------------------------------------
+function callInFrame(fnName, ...args) {
+    const fw = getFrameWindow();
+    if (!fw) return null;
+    if (typeof fw[fnName] !== 'function') {
+        setStatus(`Função ${fnName} não encontrada. Clique em "Injetar Cone Selector" primeiro.`);
+        return null;
+    }
+    return fw[fnName](...args);
+}
+
+function getParams() {
+    const apex = document.getElementById('cs-apex').value.trim().split(/\s+/).map(Number);
+    const axis = document.getElementById('cs-axis').value.trim().split(/\s+/).map(Number);
+    const angleDeg = parseFloat(document.getElementById('cs-angle').value);
+    const range    = parseFloat(document.getElementById('cs-range').value);
+    const op       = document.getElementById('cs-op').value;
+    return { apex, axis, angleDeg, range, op };
+}
+
+// ---------------------------------------------------------------------------
+// Executar seleção por cone via window.scene do iframe
+// ---------------------------------------------------------------------------
+function doSelect() {
+    const fw = getFrameWindow();
+    if (!fw) return;
+    const { apex, axis, angleDeg, range, op } = getParams();
+
+    // Tentar usar a função exposta pelo inject.mjs (se já injetado)
+    if (typeof fw.coneSelectApply === 'function') {
+        const r = fw.coneSelectApply(apex, axis, angleDeg, range, op);
+        setStatus(r.error ? `Erro: ${r.error}` : `✓ ${r.inside}/${r.total} gaussianas (${op})`);
+        return;
+    }
+
+    // Fallback: executar inline via eval (requer same-origin)
+    try {
+        const scene = fw.scene;
+        if (!scene) { setStatus('window.scene não encontrado no iframe.'); return; }
+        const splats = scene.elements.filter(e => e.splatData);
+        if (!splats.length) { setStatus('Nenhum splat no iframe.'); return; }
+
+        const splat = splats[0];
+        const { splatData } = splat;
+        const x = splatData.getProp('x');
+        const y = splatData.getProp('y');
+        const z = splatData.getProp('z');
+        const stateArr = splatData.getProp('state');
+        if (!x) { setStatus('Propriedades x/y/z não encontradas.'); return; }
+
+        const len = Math.sqrt(axis.reduce((s,v) => s + v*v, 0));
+        const normAxis = len > 0 ? axis.map(v => v / len) : [0, 0, -1];
+        const tanA = Math.tan(angleDeg * Math.PI / 180);
+        let count = 0;
+        for (let i = 0; i < splatData.numSplats; i++) {
+            const dx = x[i]-apex[0], dy = y[i]-apex[1], dz = z[i]-apex[2];
+            const t = dx*normAxis[0]+dy*normAxis[1]+dz*normAxis[2];
+            const inside = t > 0 && t < range &&
+                (dx-t*normAxis[0])**2+(dy-t*normAxis[1])**2+(dz-t*normAxis[2])**2 <= (t*tanA)**2;
+            if (stateArr) {
+                const d = (stateArr[i] & 2) !== 0, lk = (stateArr[i] & 4) !== 0;
+                if (!d && !lk) {
+                    if (op === 'set') stateArr[i] = inside ? 1 : 0;
+                    else if (op === 'add' && inside) stateArr[i] |= 1;
+                    else if (op === 'remove' && inside) stateArr[i] &= ~1;
+                }
+            }
+            if (inside) count++;
+        }
+        // Update state texture
+        if (typeof splat.updateState === 'function') splat.updateState();
+        else if (splat.stateTexture) {
+            const data = splat.stateTexture.lock();
+            data.set(stateArr);
+            splat.stateTexture.unlock();
+        }
+        scene.forceRender = true;
+        setStatus(`✓ ${count}/${splatData.numSplats} gaussianas (${op})`);
+    } catch (e) {
+        setStatus(`Erro: ${e.message}`);
+    }
+}
+
+function doClear() {
+    const fw = getFrameWindow();
+    if (!fw) return;
+    try {
+        const scene = fw.scene;
+        const splats = scene?.elements?.filter(e => e.splatData) ?? [];
+        if (!splats.length) { setStatus('Nenhum splat.'); return; }
+        const splat = splats[0];
+        const stateArr = splat.splatData.getProp('state');
+        if (stateArr) for (let i = 0; i < stateArr.length; i++) stateArr[i] &= ~1;
+        if (typeof splat.updateState === 'function') splat.updateState();
+        else if (splat.stateTexture) {
+            const data = splat.stateTexture.lock(); data.set(stateArr); splat.stateTexture.unlock();
+        }
+        scene.forceRender = true;
+        setStatus('Seleção limpa.');
+    } catch (e) { setStatus(`Erro: ${e.message}`); }
+}
+
+async function doSend() {
+    const fw = getFrameWindow();
+    if (!fw) return;
+    setStatus('Serializando...');
+    try {
+        const scene = fw.scene;
+        const splats = scene?.elements?.filter(e => e.splatData) ?? [];
+        if (!splats.length) { setStatus('Nenhum splat.'); return; }
+        const splat = splats[0];
+        const { splatData } = splat;
+        const props = ['x','y','z','f_dc_0','f_dc_1','f_dc_2','scale_0','scale_1','scale_2',
+                       'rot_0','rot_1','rot_2','rot_3','opacity'];
+        const available = props.filter(p => splatData.getProp(p) != null);
+        const arrays = available.map(p => splatData.getProp(p));
+        const stateArr = splatData.getProp('state');
+        const n = splatData.numSplats;
+        const selected = [];
+        for (let i = 0; i < n; i++) {
+            if (!stateArr || (stateArr[i] & 1) !== 0) selected.push(i);
+        }
+        if (!selected.length) { setStatus('Nenhuma gaussiana selecionada.'); return; }
+        setStatus(`Serializando ${selected.length} gaussianas...`);
+        const propLines = available.map(p => `property float ${p}`).join('\n');
+        const header = `ply\nformat binary_little_endian 1.0\nelement vertex ${selected.length}\n${propLines}\nend_header\n`;
+        const headerBytes = new TextEncoder().encode(header);
+        const stride = available.length * 4;
+        const body = new Uint8Array(selected.length * stride);
+        const view = new DataView(body.buffer);
+        for (let si = 0; si < selected.length; si++) {
+            const i = selected[si];
+            for (let j = 0; j < arrays.length; j++)
+                view.setFloat32((si * available.length + j) * 4, arrays[j][i], true);
+        }
+        const blob = new Uint8Array(headerBytes.length + body.length);
+        blob.set(headerBytes); blob.set(body, headerBytes.length);
+        const bridgeUrl = document.getElementById('bridge-url').value.trim();
+        const form = new FormData();
+        form.append('file', new Blob([blob.buffer], { type: 'application/octet-stream' }), 'selected.ply');
+        const resp = await fetch(bridgeUrl, { method: 'POST', body: form });
+        const json = await resp.json();
+        setStatus(json.ok ? `Bridge OK — ${json.outputBytes} bytes` : `Bridge erro: ${json.error ?? JSON.stringify(json)}`);
+    } catch (e) { setStatus(`Erro: ${e.message}`); }
+}
+
+function autoApex() {
+    const fw = getFrameWindow();
+    if (!fw) return;
+    try {
+        const splats = fw.scene?.elements?.filter(e => e.splatData) ?? [];
+        if (!splats.length) { setStatus('Nenhum splat no iframe.'); return; }
+        const bound = splats[0].worldBound ?? splats[0].localBoundStorage;
+        if (!bound) { setStatus('Bound não disponível.'); return; }
+        const { center, halfExtents } = bound;
+        const apex = [center.x, center.y + halfExtents.y, center.z + halfExtents.z * 0.5];
+        document.getElementById('cs-apex').value = apex.map(v => v.toFixed(3)).join(' ');
+        setStatus(`Ápice automático: ${apex.map(v => v.toFixed(3)).join(', ')}`);
+    } catch (e) { setStatus(`Erro: ${e.message}`); }
+}
+</script>
+</body>
+</html>
