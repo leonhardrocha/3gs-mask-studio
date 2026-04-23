@@ -501,6 +501,19 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 
 ---
 
+### Fase 11 — Wrapper same-origin para remover injeção manual
+
+**Rollback anchor antes da fase**: `bf2f49b216efe7c845308121d1e788af17b9c74d`
+
+- [x] Validar que o build do SuperSplat em `supersplat/dist/` responde corretamente quando servido pela mesma origem em `http://localhost:8080/supersplat/dist/`.
+- [x] Alterar `tools/cone-selector/index.html` para usar `http://localhost:8080/supersplat/dist/` como URL padrão do iframe e do campo `URL SuperSplat`.
+- [x] Reabilitar injeção automática do `inject.mjs` quando o iframe estiver same-origin, mantendo fallback claro para URLs cross-origin.
+- [ ] Testar no navegador: `Abrir com splat` + `Injetar Cone Selector` sem DevTools quando o iframe estiver em `8080/supersplat/dist/`.
+
+**Commit**: pendente
+
+---
+
 ## Referências
 
 - Engine GSplat API: https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/

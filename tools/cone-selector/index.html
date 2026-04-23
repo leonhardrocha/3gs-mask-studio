@@ -144,7 +144,7 @@
     <div class="section">
       <label>URL SuperSplat</label>
       <div id="splat-url-bar">
-        <input id="supersplat-url" type="text" value="http://localhost:3000" />
+        <input id="supersplat-url" type="text" value="http://localhost:8080/supersplat/dist/" />
         <button onclick="loadSuperSplat()">▶</button>
       </div>
       <label>Splat URL (para carregar via ?load=)</label>
@@ -196,7 +196,7 @@
 
   <!-- Área do iframe SuperSplat -->
   <div id="frame-wrap">
-    <iframe id="supersplat-frame" src="http://localhost:3000"
+    <iframe id="supersplat-frame" src="http://localhost:8080/supersplat/dist/"
       allow="xr-spatial-tracking; camera; microphone"
       sandbox="allow-scripts allow-same-origin allow-forms allow-popups">
     </iframe>
@@ -242,6 +242,15 @@ function setStatus(msg) {
     console.log('[wrapper]', msg);
 }
 
+function getFrameDocument() {
+  const frame = document.getElementById('supersplat-frame');
+  try {
+    return frame.contentWindow?.document ?? null;
+  } catch (_error) {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Carregar SuperSplat no iframe
 // ---------------------------------------------------------------------------
@@ -269,20 +278,31 @@ function injectScript() {
     sendCmd('ping', {}, 1500)
         .then(() => setStatus('Cone Selector já está ativo no iframe.'))
         .catch(() => {
-            // Não está injetado — informar o usuário com instrução clara
-            const src = `http://localhost:8080/tools/cone-selector/inject.mjs`;
-            setStatus(
-                `Injete manualmente no DevTools do SuperSplat:\n` +
-                `const s=document.createElement('script');s.type='module';` +
-                `s.src='${src}';document.head.appendChild(s);`
-            );
-            // Copiar para clipboard para facilitar
-            navigator.clipboard?.writeText(
-                `const s=document.createElement('script');s.type='module';s.src='${src}';document.head.appendChild(s);`
-            ).then(() => setStatus(
-                `Código copiado para clipboard!\n` +
-                `Abra DevTools no iframe (F12 → Console) e cole com Ctrl+V.`
-            )).catch(() => {});
+      const src = `${window.location.origin}/tools/cone-selector/inject.mjs`;
+      const doc = getFrameDocument();
+
+      if (doc) {
+        const existing = doc.getElementById('cone-selector-module');
+        if (existing) {
+          setStatus('Cone Selector já foi solicitado para o iframe. Aguarde a carga.');
+          return;
+        }
+
+        const script = doc.createElement('script');
+        script.id = 'cone-selector-module';
+        script.type = 'module';
+        script.src = `${src}?t=${Date.now()}`;
+        script.onload = () => setStatus('Cone Selector injetado automaticamente no iframe.');
+        script.onerror = () => setStatus('Falha ao carregar inject.mjs no iframe.');
+        doc.head.appendChild(script);
+        setStatus('Injetando Cone Selector no iframe...');
+        return;
+      }
+
+      setStatus(
+        `Injeção automática indisponível: o iframe está em outra origem.\n` +
+        `Use um URL same-origin como ${window.location.origin}/supersplat/dist/ ou injete manualmente no DevTools.`
+      );
         });
 }
 
