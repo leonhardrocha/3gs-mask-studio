@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node index.js",
     "test:cone-math": "node --test scripts/cone-selection-math.test.mjs",
+    "test:bridge-pipeline": "node --test scripts/bridge-pipeline.test.mjs",
     "test:plugin-bridge-smoke": "node scripts/plugin-bridge-smoke.mjs",
     "test:ply-exporter": "node --test scripts/ply-exporter-contract.test.mjs",
     "test:round-trip": "node --test scripts/round-trip.test.mjs"

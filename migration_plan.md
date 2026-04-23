@@ -177,6 +177,64 @@ void main(void) {
 
 ---
 
+## Pipeline CLI sem hardcode (bridge)
+
+Para evitar lógica fixa no bridge, o processamento deve ser dividido em 3 etapas
+parametrizadas por variáveis de ambiente:
+
+- `SELECT_CLI_CMD`: isola as gaussianas selecionadas pelo cone.
+- `MASK_CLI_CMD`: aplica pós-processamento de máscara/limpeza.
+- `EXPORT_CLI_CMD`: gera o arquivo final com sufixo `_output`.
+
+### Contrato de placeholders (proposto)
+
+Além de `{input}` e `{output}`, o bridge deve suportar placeholders intermediários
+para encadear comandos sem hardcode de caminho:
+
+- `{input}`: arquivo recebido no `POST /process-mask`.
+- `{selected}`: saída da etapa de seleção.
+- `{masked}`: saída da etapa de máscara.
+- `{output}`: saída final definida pelo bridge (com sufixo).
+
+### Comandos sugeridos
+
+```env
+# 1) Seleção: mantém apenas gaussianas marcadas no exportador VR
+# Convenção atual do app: opacity_raw = +100 (selecionada), -100 (não selecionada)
+SELECT_CLI_CMD=splat-transform -w {input} -V opacity_raw,gt,0 {selected}
+
+# 2) Máscara/limpeza: remove floaters na nuvem já selecionada
+# Formato: -G [voxelSize,opacityCutoff,minContribution]
+MASK_CLI_CMD=splat-transform -w {selected} -G 0.05,0.1,0.004 {masked}
+
+# 3) Export final: grava o resultado final em .ply
+EXPORT_CLI_CMD=splat-transform -w {masked} {output}
+```
+
+### Regra de nome de saída (sufixo `_output`)
+
+O bridge deve derivar `{output}` a partir do nome base do arquivo de entrada:
+
+- Entrada: `scene.ply`
+- Saída: `scene_output.ply`
+
+Se necessário, manter em `.env` um sufixo configurável:
+
+```env
+MASK_OUTPUT_SUFFIX=_output
+MASK_OUTPUT_EXT=.ply
+```
+
+### Observações sobre `-V` vs `-G`
+
+- `-V` (`--filter-value`) é o filtro determinístico da seleção do cone
+  (recomendado para etapa `SELECT_CLI_CMD`).
+- `-G` (`--filter-floaters`) é limpeza geométrica adicional após seleção
+  (recomendado para etapa `MASK_CLI_CMD`).
+- Para o caso "manter somente seleção", `SELECT_CLI_CMD` sozinho já resolve.
+
+---
+
 ## Plano de fases
 
 ### Fase 1 — Ambiente
@@ -208,6 +266,20 @@ void main(void) {
 
 - [x] Seleção incremental (chunks) para evitar stutter em VR (> 1M gaussianas).
 - [x] Web Worker opcional para seleção fora da thread de renderização (com fallback local).
+
+### Fase 6 — Pipeline CLI configurável (sem hardcode)
+
+- [x] Expandir bridge para suportar `SELECT_CLI_CMD`, `MASK_CLI_CMD`, `EXPORT_CLI_CMD`.
+- [x] Implementar execução em cadeia com arquivos temporários (`{selected}` → `{masked}` → `{output}`).
+- [x] Validar placeholders obrigatórios e retornar erro 501/400 com mensagem clara quando ausentes.
+- [x] Preservar compatibilidade: se só `MASK_CLI_CMD` existir, manter modo legado de etapa única.
+
+### Fase 7 — Política de saída e export
+
+- [ ] Implementar nome de saída com sufixo `_output` sobre o basename de entrada.
+- [ ] Tornar sufixo/extensão configuráveis por ambiente (`MASK_OUTPUT_SUFFIX`, `MASK_OUTPUT_EXT`).
+- [ ] Garantir `-w/--overwrite` em todos os comandos para evitar falhas por arquivo existente.
+- [ ] Cobrir com testes de contrato: nome final, encadeamento e fallback legado.
 
 ---
 
