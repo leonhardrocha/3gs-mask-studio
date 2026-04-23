@@ -9,7 +9,7 @@
  *  5. Expõe botão de entrada em VR se WebXR estiver disponível.
  */
 
-import * as pc from '../engine/build/playcanvas/src/index.js';
+import * as pc from '../engine/build/playcanvas.mjs';
 import { VrMaskerScript, BRIDGE_DEFAULT_URL } from './scripts/vr-masker.mjs';
 
 // ---------------------------------------------------------------------------

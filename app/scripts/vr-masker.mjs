@@ -26,7 +26,7 @@
  *  'bridge:error'     (message: string)       — falha no bridge
  */
 
-import * as pc from '../../engine/build/playcanvas/src/index.js';
+import * as pc from '../../engine/build/playcanvas.mjs';
 
 export const BRIDGE_DEFAULT_URL = 'http://localhost:3001/process-mask';
 
@@ -68,15 +68,17 @@ function exportMaskedPly(splatData, selectedSet) {
                    'opacity'];
 
     // Colunas float32 disponíveis no GSplatData
-    const available = props.filter(p => splatData.hasElement('vertex', p));
+    // Colunas float32 disponíveis no GSplatData (getProp retorna Float32Array ou null)
+    const available = props.filter(p => splatData.getProp(p) != null);
+    const propArrays = available.map(p => splatData.getProp(p));
 
     const stride = available.length + 1; // +1 para opacity_raw
     const buf = new Float32Array(count * stride);
 
     for (let i = 0; i < count; i++) {
         let off = i * stride;
-        for (const col of available) {
-            buf[off++] = splatData.getElement('vertex', col, i);
+        for (let j = 0; j < propArrays.length; j++) {
+            buf[off++] = propArrays[j][i];
         }
         // opacity_raw: selecionado = +100, não selecionado = -100
         buf[off] = selectedSet.has(i) ? 100 : -100;
@@ -333,23 +335,26 @@ VrMaskerScript.prototype._initSelectionWorker = function () {
 };
 
 VrMaskerScript.prototype._prepareWorkerPositions = function () {
-    if (!this._selectionWorker || !this._splatEntity?.gsplat?.asset?.resource?.splatData) {
+    if (!this._selectionWorker || !this._splatEntity?.gsplat?.asset?.resource) {
         return;
     }
 
-    const splatData = this._splatEntity.gsplat.asset.resource.splatData;
+    const splatData = this._splatEntity.gsplat.asset.resource;
     const count = splatData.numSplats;
     const worldMat = this._splatEntity.getWorldTransform();
 
+    const xProp = splatData.getProp('x');
+    const yProp = splatData.getProp('y');
+    const zProp = splatData.getProp('z');
     const local = new pc.Vec3();
     const world = new pc.Vec3();
     const positions = new Float32Array(count * 3);
 
     for (let i = 0; i < count; i++) {
         local.set(
-            splatData.getElement('vertex', 'x', i),
-            splatData.getElement('vertex', 'y', i),
-            splatData.getElement('vertex', 'z', i)
+            xProp[i],
+            yProp[i],
+            zProp[i]
         );
         worldMat.transformPoint(local, world);
         const base = i * 3;
@@ -368,8 +373,7 @@ VrMaskerScript.prototype._doSelection = function () {
     const gsplatComp = this._splatEntity.gsplat;
     if (!gsplatComp?.asset?.resource) return;
 
-    const splatData = gsplatComp.asset.resource.splatData;
-    if (!splatData) return;
+    const splatData = gsplatComp.asset.resource;
 
     const { apex, axis } = this._getConeParams();
     const tanAngle = Math.tan(this.coneAngleDeg * Math.PI / 180);
@@ -401,17 +405,16 @@ VrMaskerScript.prototype._doSelection = function () {
 
     // Fallback: seleção no thread principal
     const worldMat = this._splatEntity.getWorldTransform();
+    const xArr = splatData.getProp('x');
+    const yArr = splatData.getProp('y');
+    const zArr = splatData.getProp('z');
     const p = new pc.Vec3();
     const pw = new pc.Vec3();
 
     for (let i = start; i < end; i++) {
         if (this._selected.has(i)) continue; // já selecionado
 
-        p.set(
-            splatData.getElement('vertex', 'x', i),
-            splatData.getElement('vertex', 'y', i),
-            splatData.getElement('vertex', 'z', i)
-        );
+        p.set(xArr[i], yArr[i], zArr[i]);
         worldMat.transformPoint(p, pw);
 
         if (pointInsideCone(pw, apex, axis, tanAngle, maxRange)) {
@@ -434,13 +437,13 @@ VrMaskerScript.prototype._sendToBridge = function () {
     }
 
     const gsplatComp = this._splatEntity.gsplat;
-    if (!gsplatComp?.asset?.resource?.splatData) {
+    if (!gsplatComp?.asset?.resource) {
         this.fire('bridge:error', 'GSplat data indisponível');
         return;
     }
 
     const plyBytes = exportMaskedPly(
-        gsplatComp.asset.resource.splatData,
+        gsplatComp.asset.resource,
         this._selected
     );
 
