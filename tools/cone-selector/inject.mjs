@@ -24,6 +24,136 @@
 // ---------------------------------------------------------------------------
 const BRIDGE_URL = 'http://localhost:3001/process-mask';
 
+const PREVIEW_SEGMENTS = 32;
+const previewState = {
+    enabled: true,
+    apex: [0, 0, 3],
+    axis: [0, 0, -1],
+    angleDeg: 30,
+    range: 5
+};
+
+let previewHookInstalled = false;
+
+function norm(v) {
+    const len = Math.hypot(v[0], v[1], v[2]);
+    if (len <= 1e-8) return [0, 0, -1];
+    return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+function basisFromAxis(axis) {
+    const w = norm(axis);
+    const up = Math.abs(w[1]) < 0.95 ? [0, 1, 0] : [1, 0, 0];
+    const u = norm([
+        w[1] * up[2] - w[2] * up[1],
+        w[2] * up[0] - w[0] * up[2],
+        w[0] * up[1] - w[1] * up[0]
+    ]);
+    const v = [
+        w[1] * u[2] - w[2] * u[1],
+        w[2] * u[0] - w[0] * u[2],
+        w[0] * u[1] - w[1] * u[0]
+    ];
+    return { u, v, w };
+}
+
+function buildConeLineArrays(apex, axis, angleDeg, range, segments = PREVIEW_SEGMENTS) {
+    const tanA = Math.tan((angleDeg * Math.PI) / 180);
+    const r = Math.max(0.001, range * tanA);
+    const { u, v, w } = basisFromAxis(axis);
+
+    const center = [
+        apex[0] + w[0] * range,
+        apex[1] + w[1] * range,
+        apex[2] + w[2] * range
+    ];
+
+    const positions = [];
+    const colors = [];
+    const pushLine = (a, b, color) => {
+        positions.push(a[0], a[1], a[2], b[0], b[1], b[2]);
+        colors.push(color[0], color[1], color[2], color[3], color[0], color[1], color[2], color[3]);
+    };
+
+    const ringColor = [0.15, 0.85, 1.0, 0.95];
+    const axisColor = [1.0, 0.75, 0.2, 1.0];
+
+    // axis line
+    pushLine(apex, center, axisColor);
+
+    let prev = null;
+    for (let i = 0; i <= segments; i++) {
+        const t = (i / segments) * Math.PI * 2;
+        const cs = Math.cos(t);
+        const sn = Math.sin(t);
+
+        const p = [
+            center[0] + r * (u[0] * cs + v[0] * sn),
+            center[1] + r * (u[1] * cs + v[1] * sn),
+            center[2] + r * (u[2] * cs + v[2] * sn)
+        ];
+
+        // side line from apex to ring point (sparse to reduce clutter)
+        if (i % Math.max(1, Math.floor(segments / 8)) === 0) {
+            pushLine(apex, p, ringColor);
+        }
+
+        if (prev) pushLine(prev, p, ringColor);
+        prev = p;
+    }
+
+    return { positions, colors };
+}
+
+function drawPreviewCone() {
+    if (!previewState.enabled) return;
+    const scene = window.scene;
+    const app = scene?.app;
+    if (!scene || !app) return;
+
+    const { positions, colors } = buildConeLineArrays(
+        previewState.apex,
+        previewState.axis,
+        previewState.angleDeg,
+        previewState.range
+    );
+
+    if (!positions.length) return;
+
+    const layer = scene.gizmoLayer ?? app.scene.defaultDrawLayer;
+    app.drawLineArrays(positions, colors, true, layer);
+}
+
+function installPreviewHook() {
+    if (previewHookInstalled) return;
+    const app = window.scene?.app;
+    if (!app) return;
+
+    app.on('prerender', drawPreviewCone);
+    previewHookInstalled = true;
+}
+
+function updatePreview(params = {}) {
+    if (Array.isArray(params.apex) && params.apex.length === 3) {
+        previewState.apex = params.apex.map(Number);
+    }
+    if (Array.isArray(params.axis) && params.axis.length === 3) {
+        previewState.axis = params.axis.map(Number);
+    }
+    if (Number.isFinite(params.angleDeg)) {
+        previewState.angleDeg = Number(params.angleDeg);
+    }
+    if (Number.isFinite(params.range)) {
+        previewState.range = Number(params.range);
+    }
+    if (typeof params.enabled === 'boolean') {
+        previewState.enabled = params.enabled;
+    }
+
+    installPreviewHook();
+    if (window.scene) window.scene.forceRender = true;
+}
+
 // ---------------------------------------------------------------------------
 // Predicado de cone — mesma função de select-cone.mjs e vr-masker.mjs
 // ---------------------------------------------------------------------------
@@ -87,6 +217,9 @@ function applyConeSeleciton(apex, axis, angleDeg, range, op) {
         }
         if (inside) count++;
     }
+
+    // Atualizar preview do cone para refletir os parâmetros atuais
+    updatePreview({ apex, axis: normAxis, angleDeg, range });
 
     // Atualizar a textura de estado no SuperSplat
     try {
@@ -265,6 +398,10 @@ function injectPanel() {
             <option value="set">Set</option>
             <option value="remove">Remove</option>
         </select>
+        <label style="display:flex;align-items:center;gap:6px;margin:0 0 8px;">
+            <input id="cs-preview" type="checkbox" checked>
+            Mostrar cone (preview)
+        </label>
         <div style="display:flex;gap:6px;margin-bottom:6px;">
             <button id="cs-select" style="flex:1;padding:5px;background:#1d4ed8;
                 color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;">
@@ -297,6 +434,7 @@ function injectPanel() {
     rangeInput.addEventListener('input', () => { rangeVal.textContent = rangeInput.value; });
 
     const statusEl = document.getElementById('cs-status');
+    const previewToggle = document.getElementById('cs-preview');
 
     const getParams = () => {
         const apex = document.getElementById('cs-apex').value.trim().split(/\s+/).map(Number);
@@ -306,6 +444,17 @@ function injectPanel() {
         const op       = document.getElementById('cs-op').value;
         return { apex, axis, angleDeg, range, op };
     };
+
+    const pushPreview = () => {
+        const { apex, axis, angleDeg, range } = getParams();
+        updatePreview({ apex, axis, angleDeg, range, enabled: previewToggle.checked });
+    };
+
+    document.getElementById('cs-apex').addEventListener('change', pushPreview);
+    document.getElementById('cs-axis').addEventListener('change', pushPreview);
+    angleInput.addEventListener('input', pushPreview);
+    rangeInput.addEventListener('input', pushPreview);
+    previewToggle.addEventListener('change', pushPreview);
 
     // Selecionar
     document.getElementById('cs-select').addEventListener('click', () => {
@@ -342,6 +491,9 @@ function injectPanel() {
         const { apex, axis, angleDeg, range } = getParams();
         sendToBridge(statusEl, apex, axis, angleDeg, range);
     });
+
+    // Desenha o preview imediatamente ao abrir o painel
+    pushPreview();
 
     console.log('[cone-selector] painel injetado com sucesso');
 }
@@ -398,6 +550,12 @@ window.addEventListener('message', (event) => {
 
     if (cmd === 'autoApex') {
         reply({ ok: true, apex: getDefaultApex() });
+        return;
+    }
+
+    if (cmd === 'preview') {
+        updatePreview(payload ?? {});
+        reply({ ok: true });
         return;
     }
 });

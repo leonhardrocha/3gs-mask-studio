@@ -175,6 +175,10 @@
         <option value="set">Set</option>
         <option value="remove">Remove</option>
       </select>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+        <input id="cs-preview" type="checkbox" checked />
+        Mostrar cone (preview)
+      </label>
     </div>
 
     <!-- Ações -->
@@ -326,7 +330,10 @@ function injectScript() {
         script.id = 'cone-selector-module';
         script.type = 'module';
         script.src = `${src}?t=${Date.now()}`;
-        script.onload = () => setStatus('Cone Selector injetado automaticamente no iframe.');
+        script.onload = () => {
+          setStatus('Cone Selector injetado automaticamente no iframe.');
+          setTimeout(pushPreviewToIframe, 150);
+        };
         script.onerror = () => setStatus('Falha ao carregar inject.mjs no iframe.');
         doc.head.appendChild(script);
         setStatus('Injetando Cone Selector no iframe...');
@@ -347,6 +354,16 @@ function getParams() {
     const range    = parseFloat(document.getElementById('cs-range').value);
     const op       = document.getElementById('cs-op').value;
     return { apex, axis, angleDeg, range, op };
+}
+
+async function pushPreviewToIframe() {
+  const enabled = document.getElementById('cs-preview').checked;
+  const { apex, axis, angleDeg, range } = getParams();
+  try {
+    await sendCmd('preview', { apex, axis, angleDeg, range, enabled }, 1200);
+  } catch (_e) {
+    // Sem erro visual aqui: o preview só funciona após inject.mjs estar ativo.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -395,8 +412,21 @@ async function autoApex() {
         const r = await sendCmd('autoApex');
         document.getElementById('cs-apex').value = r.apex.map(v => parseFloat(v).toFixed(3)).join(' ');
         setStatus(`Ápice automático: ${r.apex.map(v => parseFloat(v).toFixed(3)).join(', ')}`);
+    pushPreviewToIframe();
     } catch (e) { setStatus(`Erro: ${e.message}`); }
 }
+
+// Atualização interativa do cone ao editar parâmetros na UI
+document.getElementById('cs-apex').addEventListener('change', pushPreviewToIframe);
+document.getElementById('cs-axis').addEventListener('change', pushPreviewToIframe);
+document.getElementById('cs-angle').addEventListener('input', pushPreviewToIframe);
+document.getElementById('cs-range').addEventListener('input', pushPreviewToIframe);
+document.getElementById('cs-preview').addEventListener('change', pushPreviewToIframe);
+
+// Quando o iframe recarrega, tenta reaplicar preview automaticamente
+document.getElementById('supersplat-frame').addEventListener('load', () => {
+  setTimeout(pushPreviewToIframe, 400);
+});
 </script>
 </body>
 </html>
