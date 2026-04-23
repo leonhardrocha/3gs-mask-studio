@@ -5,6 +5,7 @@ Este workspace integra:
 1. SuperSplat (editor de Gaussian Splats)
 2. plugin VR de máscara por cone
 3. bridge local Node.js para processar o `.ply` exportado
+4. página wrapper em `tools/cone-selector/` para carregar splats por URL e controlar seleção fora da UI nativa do SuperSplat
 
 O fluxo é: selecionar em VR -> exportar `.ply` com marcação de opacidade -> enviar para bridge -> executar comando CLI (`splat-transform`) -> gerar arquivo de saída filtrado.
 
@@ -12,6 +13,7 @@ O fluxo é: selecionar em VR -> exportar `.ply` com marcação de opacidade -> e
 
 - `supersplat/`: editor e plugin VR (`src/plugins/mask-tool/`)
 - `tools/bridge-server/`: servidor HTTP local para receber/processar o `.ply`
+- `tools/cone-selector/`: wrapper HTML + módulo injetável para seleção por cone no SuperSplat
 - `splat-transform/`: CLI usada no processamento de máscara
 
 ## Pre-requisitos
@@ -86,7 +88,7 @@ Observações:
 
 ## Como executar
 
-Abra dois terminais.
+Abra três terminais.
 
 ### Terminal 1: Bridge server
 
@@ -109,6 +111,18 @@ npm run develop
 ```
 
 Abra `http://localhost:3000`.
+
+### Terminal 3: Servidor estático do workspace
+
+```bash
+npx --yes serve . -p 8080
+```
+
+Observações:
+
+- O arquivo `serve.json` na raiz já habilita CORS (`Access-Control-Allow-Origin: *`) para os arquivos servidos em `http://localhost:8080`.
+- Isso é necessário para que o SuperSplat em `http://localhost:3000` consiga carregar `sample.ply` e outros `.ply` remotos via `?load=`.
+- O comando `npm run develop` existe em `supersplat/package.json`, não na raiz do workspace.
 
 ## Como ativar e usar o plugin VR
 
@@ -144,6 +158,53 @@ Comportamento de filtro atual:
 - selecionado -> `opacity_raw = +100`
 - não selecionado -> `opacity_raw = -100`
 - filtro CLI -> `opacity,gt,0.5`
+
+## Wrapper integrado (`tools/cone-selector/`)
+
+O wrapper em `tools/cone-selector/index.html` fornece um fluxo sem modificar o código-fonte do SuperSplat:
+
+- sidebar com parâmetros do cone (`apex`, `axis`, `angle`, `range`, `op`)
+- campo para URL do splat
+- botão `Abrir com splat`, que monta `http://localhost:3000/?load=<PLY_URL>`
+- comunicação com o iframe do SuperSplat via `window.postMessage`
+- envio da seleção ao bridge com `application/octet-stream`
+
+URL de acesso:
+
+```text
+http://localhost:8080/tools/cone-selector/index.html
+```
+
+Fluxo recomendado:
+
+1. Inicie o bridge em `http://localhost:3001`.
+2. Inicie o SuperSplat em `http://localhost:3000` com `cd supersplat && npm run develop`.
+3. Inicie o servidor estático na raiz com `npx --yes serve . -p 8080`.
+4. Abra `http://localhost:8080/tools/cone-selector/index.html`.
+5. Use `Abrir com splat` para carregar, por exemplo, `http://localhost:8080/tools/bridge-server/sample.ply`.
+
+Observações importantes:
+
+- Se `http://localhost:3000` não estiver ativo, o botão `Abrir com splat` abrirá uma URL correta, mas o navegador mostrará a página genérica de indisponibilidade porque não existe app respondendo nessa porta.
+- O parâmetro `?load=` é suportado pelo SuperSplat; o erro observado anteriormente era de disponibilidade do servidor, não de sintaxe da URL.
+- O iframe roda em origem diferente (`3000` vs `8080`), então o wrapper não pode acessar `iframe.contentWindow.document` diretamente. O controle entre wrapper e SuperSplat usa `postMessage`.
+- O botão `Injetar Cone Selector` não consegue injetar DOM cross-origin automaticamente. Ele apenas ajuda a preparar a injeção manual quando o módulo ainda não foi carregado no contexto do SuperSplat.
+
+Snippet de injeção manual no Console do DevTools do SuperSplat:
+
+```js
+const s = document.createElement('script');
+s.type = 'module';
+s.src = 'http://localhost:8080/tools/cone-selector/inject.mjs';
+document.head.appendChild(s);
+```
+
+Depois da injeção, os botões do wrapper passam a funcionar via `postMessage`:
+
+- `Selecionar`
+- `Limpar seleção`
+- `Enviar ao Bridge`
+- `Auto (centro do splat)`
 
 ## Configuração do plugin
 
