@@ -19,6 +19,8 @@
  *     binário e envia via POST /process-mask.
  */
 
+import { sendOpacityFilteredPlyToBridge } from './serialize-selected-full.mjs';
+
 // ---------------------------------------------------------------------------
 // Configuração padrão do bridge
 // ---------------------------------------------------------------------------
@@ -313,13 +315,37 @@ function serializeSelectedPly(apex, axis, angleDeg, range) {
 // Enviar PLY ao bridge
 // ---------------------------------------------------------------------------
 async function sendToBridge(statusEl, apex, axis, angleDeg, range) {
-    statusEl.textContent = 'Serializando...';
+    statusEl.textContent = 'Exportando seleção completa...';
+
+    // Nova via: usa a API oficial de export do SuperSplat para preservar
+    // propriedades completas no PLY antes de enviar ao bridge.
+    try {
+        const exported = await sendOpacityFilteredPlyToBridge({
+            bridgeUrl: BRIDGE_URL,
+            filename: 'selection-opacity-tagged.ply',
+            selectedOpacityRaw: 0.0,
+            unselectedOpacityRaw: 1.0,
+            opacityThresholdRaw: 0.0
+        });
+
+        if (exported?.ok) {
+            statusEl.textContent = `Bridge OK (CLI opacity filter) — ${exported.count} gaussianas, ${exported.outputBytes} bytes`;
+            return;
+        }
+
+        // Mantém implementação atual para visualização/compatibilidade.
+        statusEl.textContent = `Fallback de exportação: ${exported?.error ?? 'erro desconhecido'}`;
+    } catch (e) {
+        statusEl.textContent = `Export completo falhou: ${e.message}`;
+    }
+
     const result = serializeSelectedPly(apex, axis, angleDeg, range);
     if (!result) {
         statusEl.textContent = 'Erro: nenhuma gaussiana selecionada.';
         return;
     }
-    statusEl.textContent = `Enviando ${result.count} gaussianas...`;
+
+    statusEl.textContent = `Enviando (modo visual) ${result.count} gaussianas...`;
     try {
         const resp = await fetch(BRIDGE_URL, {
             method: 'POST',
@@ -331,12 +357,12 @@ async function sendToBridge(statusEl, apex, axis, angleDeg, range) {
         });
         const json = await resp.json();
         if (json.ok) {
-            statusEl.textContent = `Bridge OK — ${json.outputBytes} bytes`;
+            statusEl.textContent = `Bridge OK (modo visual) — ${json.outputBytes} bytes`;
         } else {
-            statusEl.textContent = `Bridge erro: ${json.error ?? JSON.stringify(json)}`;
+            statusEl.textContent = `Bridge erro (modo visual): ${json.error ?? JSON.stringify(json)}`;
         }
     } catch (e) {
-        statusEl.textContent = `Fetch error: ${e.message}`;
+        statusEl.textContent = `Fetch error (modo visual): ${e.message}`;
     }
 }
 
@@ -544,6 +570,25 @@ window.addEventListener('message', (event) => {
         }
         scene.forceRender = true;
         reply({ ok: true });
+        return;
+    }
+
+    if (cmd === 'serializeFull') {
+        sendOpacityFilteredPlyToBridge({
+            bridgeUrl: payload?.bridgeUrl || BRIDGE_URL,
+            filename: payload?.filename || 'selection-opacity-tagged.ply',
+            selectedOpacityRaw: Number(payload?.selectedOpacityRaw ?? 0.0),
+            unselectedOpacityRaw: Number(payload?.unselectedOpacityRaw ?? 1.0),
+            opacityThresholdRaw: Number(payload?.opacityThresholdRaw ?? 0.0)
+        }).then((result) => {
+            if (!result?.ok) {
+                reply({ error: result?.error || 'Falha ao exportar seleção completa.' });
+                return;
+            }
+            reply({ ok: true, count: result.count, outputBytes: result.outputBytes, outputPath: result.outputPath });
+        }).catch((err) => {
+            reply({ error: err?.message || String(err) });
+        });
         return;
     }
 

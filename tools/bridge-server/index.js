@@ -85,21 +85,40 @@ const toBaseName = (filename, fallback) => {
   return parsed.name || 'mask';
 };
 
-const getPipelineMode = () => {
-  const select = (process.env.SELECT_CLI_CMD || '').trim();
-  const mask = (process.env.MASK_CLI_CMD || '').trim();
-  const exportCmd = (process.env.EXPORT_CLI_CMD || '').trim();
+const readHeaderCommand = (req, headerName) => {
+  const value = String(req.header(headerName) || '').trim();
+  return value;
+};
+
+const getPipelineMode = (req) => {
+  const selectOverride = req ? readHeaderCommand(req, 'x-select-cli-cmd') : '';
+  const maskOverride = req ? readHeaderCommand(req, 'x-mask-cli-cmd') : '';
+  const exportOverride = req ? readHeaderCommand(req, 'x-export-cli-cmd') : '';
+
+  const select = selectOverride || (process.env.SELECT_CLI_CMD || '').trim();
+  const mask = maskOverride || (process.env.MASK_CLI_CMD || '').trim();
+  const exportCmd = exportOverride || (process.env.EXPORT_CLI_CMD || '').trim();
 
   if (!select && !exportCmd) {
     return {
       type: 'legacy',
-      commands: { mask }
+      commands: { mask },
+      source: {
+        select: selectOverride ? 'header' : 'env',
+        mask: maskOverride ? 'header' : 'env',
+        exportCmd: exportOverride ? 'header' : 'env'
+      }
     };
   }
 
   return {
     type: 'pipeline',
-    commands: { select, mask, exportCmd }
+    commands: { select, mask, exportCmd },
+    source: {
+      select: selectOverride ? 'header' : 'env',
+      mask: maskOverride ? 'header' : 'env',
+      exportCmd: exportOverride ? 'header' : 'env'
+    }
   };
 };
 
@@ -140,7 +159,7 @@ app.post('/process-mask', async (req, res) => {
 
   const start = Date.now();
 
-  const mode = getPipelineMode();
+  const mode = getPipelineMode(req);
   const templateValues = {
     input: inputPath,
     selected: selectedPath,

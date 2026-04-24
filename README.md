@@ -9,6 +9,11 @@ Este workspace integra:
 
 O fluxo é: selecionar em VR -> exportar `.ply` com marcação de opacidade -> enviar para bridge -> executar comando CLI (`splat-transform`) -> gerar arquivo de saída filtrado.
 
+Hoje coexistem dois caminhos de exportação no cone-selector:
+
+- fluxo novo: exporta um PLY completo via API oficial do SuperSplat, sobrescreve `opacity` conforme a seleção atual e aplica o filtro no bridge via CLI usando `opacity_raw`
+- fluxo anterior: serialização manual mínima, mantida como fallback visual e de compatibilidade
+
 ## Estrutura
 
 - `supersplat/`: editor e plugin VR (`src/plugins/mask-tool/`)
@@ -79,12 +84,37 @@ MASK_OUTPUT_EXT=.ply
 MASK_CLI_CMD=node ../../splat-transform/bin/cli.mjs -w {input} -V opacity,gt,0.5 {output}
 ```
 
+### Fluxo novo no cone-selector: exportação completa + filtro por opacidade via CLI
+
+Quando o wrapper/cone-selector envia a seleção ao bridge, ele tenta primeiro o fluxo novo:
+
+1. exporta um PLY completo via `scene.write('ply', ...)`
+2. regrava temporariamente a opacidade em memória conforme a seleção atual
+3. envia o PLY ao bridge com comandos CLI específicos via headers HTTP
+4. filtra com `splat-transform` usando `opacity_raw`
+5. gera o arquivo final com a etapa `EXPORT`
+
+Parâmetros padrão do fluxo novo:
+
+- selecionado -> `opacity_raw = 0.0`
+- não selecionado -> `opacity_raw = 1.0`
+- limiar CLI -> `opacity_raw > 0.0`
+
+Comandos usados nesse modo:
+
+```text
+SELECT: node ../../splat-transform/bin/cli.mjs -w {input} {selected}
+MASK:   node ../../splat-transform/bin/cli.mjs -w {selected} -V opacity_raw,gt,0.0 {masked}
+EXPORT: node ../../splat-transform/bin/cli.mjs -w {masked} {output}
+```
+
 Observações:
 
 - No modo pipeline, os placeholders disponíveis são: `{input}`, `{selected}`, `{masked}`, `{output}`.
 - No modo legado, os placeholders obrigatórios são `{input}` e `{output}`.
 - Os comandos devem incluir `-w` ou `--overwrite`.
 - O bridge escreve temporários em `tools/bridge-server/tmp`.
+- O bridge também aceita overrides por requisição nos headers `x-select-cli-cmd`, `x-mask-cli-cmd` e `x-export-cli-cmd`.
 
 ## Como executar
 
@@ -186,6 +216,13 @@ Comportamento de filtro atual:
 - não selecionado -> `opacity_raw = -100`
 - filtro CLI -> `opacity,gt,0.5`
 
+Comportamento do fluxo novo no cone-selector:
+
+- selecionado -> `opacity_raw = 0.0`
+- não selecionado -> `opacity_raw = 1.0`
+- filtro CLI -> `opacity_raw,gt,0.0`
+- export final -> `node ../../splat-transform/bin/cli.mjs -w {masked} {output}`
+
 ## Wrapper integrado (`tools/cone-selector/`)
 
 O wrapper em `tools/cone-selector/index.html` fornece um fluxo sem modificar o código-fonte do SuperSplat:
@@ -237,6 +274,11 @@ Depois da injeção, os botões do wrapper passam a funcionar via `postMessage`:
 - `Enviar ao Bridge`
 - `Auto (centro do splat)`
 
+Comportamento atual do botão `Enviar ao Bridge`:
+
+1. tenta o fluxo novo de exportação completa + filtro CLI por opacidade
+2. se esse fluxo falhar, usa a serialização manual anterior como fallback
+
 ## Configuração do plugin
 
 Parâmetros suportados pelo evento `vrMasker.config`:
@@ -272,6 +314,117 @@ No SuperSplat:
 cd supersplat
 npm run lint
 ```
+
+## Teste manual do novo fluxo no cone-selector
+
+Esse é o teste mais direto para validar a exportação completa com filtro por opacidade via CLI, mantendo o fluxo anterior como fallback.
+
+### 1. Suba os serviços
+
+Terminal 1:
+
+```bash
+cd tools/bridge-server
+npm run start
+```
+
+Terminal 2:
+
+```bash
+cd supersplat
+npm run develop
+```
+
+Terminal 3:
+
+```bash
+npx --yes serve . -p 8080
+```
+
+### 2. Abra o wrapper
+
+```text
+http://localhost:8080/tools/cone-selector/index.html
+```
+
+Para o caminho mais simples, mantenha a URL same-origin padrão do SuperSplat:
+
+```text
+http://localhost:8080/supersplat/dist/
+```
+
+### 3. Carregue um splat de teste
+
+Exemplo:
+
+```text
+http://localhost:8080/tools/bridge-server/sample.ply
+```
+
+Clique em `Abrir com splat`.
+
+### 4. Faça a seleção e envie ao bridge
+
+1. ajuste `apex`, `axis`, `angle` e `range`
+2. clique em `Selecionar`
+3. confirme que o painel mostra algo como `✓ N / M gaussianas`
+4. clique em `Enviar ao Bridge`
+
+Resultado esperado no painel:
+
+- sucesso no fluxo novo: `Bridge OK (CLI opacity filter) — ...`
+- fallback antigo: `Bridge OK (modo visual) — ...`
+
+### 5. Verifique os artefatos gerados
+
+No terminal do bridge, a resposta deve incluir `ok: true`, `outputPath` e `outputBytes`.
+
+No diretório `tools/bridge-server/tmp/`, procure por arquivos como:
+
+- `mask-in-*.ply`
+- `mask-selected-*.ply`
+- `mask-masked-*.ply`
+- `selection-opacity-tagged_output.ply`
+
+Se `MASK_KEEP_TEMP=false`, os intermediários podem ser removidos; nesse caso, confira principalmente o arquivo final `_output.ply`.
+
+### 6. Teste explícito do comando `serializeFull`
+
+No console da página wrapper, execute:
+
+```js
+sendCmd('serializeFull', {
+   bridgeUrl: 'http://localhost:3001/process-mask',
+   filename: 'selection-opacity-tagged.ply',
+   selectedOpacityRaw: 0.0,
+   unselectedOpacityRaw: 1.0,
+   opacityThresholdRaw: 0.0
+}).then(console.log).catch(console.error);
+```
+
+Esperado: resposta com `ok: true`, `count`, `outputBytes` e `outputPath`.
+
+### 7. Como diferenciar o fluxo novo do antigo
+
+- se a mensagem contém `CLI opacity filter`, o fluxo novo rodou
+- se a mensagem contém `modo visual`, houve fallback para a serialização anterior
+
+### 8. Verificação manual do filtro CLI do fluxo novo
+
+Se quiser validar o filtro separadamente, rode em `tools/bridge-server`:
+
+```powershell
+$in='D:\src\3gs-mask-studio\tools\bridge-server\tmp\selection-opacity-tagged.ply'
+$sel='D:\src\3gs-mask-studio\tools\bridge-server\tmp\verify-selected.ply'
+$mask='D:\src\3gs-mask-studio\tools\bridge-server\tmp\verify-masked.ply'
+$out='D:\src\3gs-mask-studio\tools\bridge-server\tmp\verify_output.ply'
+
+node ..\..\splat-transform\bin\cli.mjs -w $in $sel
+node ..\..\splat-transform\bin\cli.mjs -w $sel -V opacity_raw,gt,0.0 $mask
+node ..\..\splat-transform\bin\cli.mjs -w $mask $out
+```
+
+Esperado: os comandos terminam com código `0` e o arquivo final contém apenas as gaussianas acima do limiar.
 
 ---
 
