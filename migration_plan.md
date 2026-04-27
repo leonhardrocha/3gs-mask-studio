@@ -514,12 +514,105 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 
 ---
 
+### Fase 12 — Camada unificada de entrada (Gamepad + VR/XR)
+
+> Objetivo: evitar lógica duplicada entre desktop e headset criando uma
+> abstração única de ponteiro/raycast para seleção por cone, reaproveitando o
+> suporte nativo de gamepad já existente na engine PlayCanvas.
+
+> **Viabilidade**: alta e de baixa a média complexidade. A engine já expõe
+> `AppOptions.gamepads`, `pc.GamePads` e o mapeamento de eixos `padrx/padry`
+> no controller interno, então o trabalho do produto fica concentrado em:
+> inicializar `gamepads` no app, transformar a alavanca direita em cursor/aim
+> virtual e mapear botões para `set/add/remove` sem depender de eventos de mouse.
+
+- [x] Criar módulo `app/scripts/input-pointer.mjs` (ou equivalente em `tools/cone-selector/`) com contrato único de entrada:
+  - `getPose()` -> `{ origin, direction, sourceType }`
+  - `getVirtualCursorDelta()` -> `{ x, y }`
+  - `isSelectPressed()` -> boolean
+  - `didSelectRelease()` -> boolean
+  - `getOperation()` -> `'set' | 'add' | 'remove'`
+  - `sourceType` em `{ gamepad, xr-left, xr-right, hmd, keyboard-fallback }`
+- [ ] Implementar backend Desktop por gamepad:
+  - [x] Inicializar `createOptions.gamepads = new pc.GamePads()` em `app/main.mjs`.
+  - [x] Reusar o suporte de eixos da engine para ler a alavanca direita (`PAD_R_STICK_X/Y` ou `padrx/padry`).
+  - [x] Converter a alavanca direita em cursor virtual/ray de tela com deadzone, sensibilidade e clamp.
+  - [x] Mapear botão 1 para modo `add` e botão 2 para modo `remove`.
+  - [x] Definir comportamento padrão sem botão modificador: `set`.
+- [ ] Implementar backend XR:
+  - [x] Priorizar controlador dominante quando ambos estiverem ativos.
+  - [x] Fallback para câmera HMD quando não houver controlador com pose válida.
+  - [x] Reusar `inputSource.gamepad` quando disponível para manter o mesmo mapeamento lógico de botões/eixos fora do desktop.
+  - [x] Mapear botão 1 para `add` e botão 2 para `remove` também no XR, preservando trigger/select como ação primária quando o perfil não expuser layout padrão.
+- [x] Integrar a camada unificada ao seletor atual:
+  - [x] Substituir leituras diretas de `this.app.xr` e `keyboard` por chamadas ao adaptador.
+  - [x] Preservar comportamento atual de seleção incremental/chunks.
+  - [x] Manter compatibilidade com o fluxo atual do bridge.
+- [ ] Definir política de prioridade de entrada (estado global):
+  - [x] Se sessão XR ativa e controlador válido -> usar XR.
+  - [x] Se sessão XR ativa sem controlador mas com `inputSource.gamepad` válido -> usar o layout XR gamepad.
+  - [x] Fora de XR com gamepad conectado -> usar cursor virtual por alavanca direita.
+  - [x] Sem gamepad -> manter apenas fallback de teclado/câmera para debug.
+
+#### Critérios de aceite da Fase 12
+
+- [ ] Mesmo predicado de cone funciona para gamepad desktop e XR sem divergência geométrica.
+- [x] Sem duplicação da lógica de seleção (fonte única).
+- [x] Cursor virtual responde à alavanca direita sem depender de eventos capturados pelo SuperSplat.
+- [ ] Troca entre gamepad desktop e XR não exige recarregar a página.
+
+---
+
+### Fase 13 — Interação por gamepad no desktop e no modo VR/XR (UX + testes)
+
+> Objetivo: entregar experiência utilizável em desktop e em headset, com
+> feedback visual consistente e testes de regressão, sem depender de mouse no
+> canvas do SuperSplat.
+
+- [ ] Desktop (gamepad na tela):
+  - [ ] Alavanca direita move cursor/retículo virtual no canvas.
+  - [ ] Botão primário confirma `set`; botão 1 ativa `add`; botão 2 ativa `remove`.
+  - [ ] Overlay de parâmetros em tempo real (`angle`, `range`, `selectedCount`, `mode`, `sourceType`).
+  - [ ] Ajuste de `coneRange` por eixo secundário ou bumpers, com deadzone e repetição controlada.
+- [ ] VR/XR:
+  - [ ] Ray visual do controlador com cor por modo (`set/add/remove`).
+  - [ ] Botão 1 = `add`, botão 2 = `remove`, usando o `gamepad` do `XRInputSource` quando disponível.
+  - [ ] Haptics curtos ao confirmar seleção (quando suportado).
+  - [ ] Zona morta e debounce para evitar spam de seleção por trigger/alavanca instáveis.
+  - [ ] Mensagem clara quando sessão XR não possui input source ou layout de gamepad utilizável.
+- [ ] Wrapper `tools/cone-selector/index.html`:
+  - [ ] Botão explícito de modo de entrada: `Auto | Gamepad | XR`.
+  - [ ] Indicador de fonte ativa (`gamepad`, `xr-left`, `xr-right`, `hmd`).
+  - [ ] Comando `serializeFull` exposto na UI com parâmetros:
+    - `selectedOpacityRaw`
+    - `unselectedOpacityRaw`
+    - `opacityThresholdRaw`
+- [ ] Testes automatizados:
+  - [x] `test:input-pointer` (mock de gamepad/xr e transição de estados).
+  - [x] `test:virtual-cursor` (deadzone, clamp e mapeamento da alavanca direita).
+  - [ ] `test:cone-projection` (consistência do raio entre gamepad desktop e XR).
+  - [x] `test:bridge-opacity-flow` (pipeline `SELECT -> MASK(-V opacity_raw,gt,T) -> EXPORT`).
+- [ ] Testes manuais (checklist):
+  - [ ] Desktop com gamepad: selecionar, limpar e enviar ao bridge.
+  - [ ] XR com 1 controlador: seleção contínua e envio ao bridge.
+  - [ ] XR com 2 controladores: prioridade do dominante.
+  - [ ] Queda de controlador em runtime: fallback para HMD/câmera sem travar.
+
+#### Critérios de aceite da Fase 13
+
+- [ ] Fluxo desktop com gamepad e fluxo XR produzem saída válida no bridge (`ok: true`, `outputBytes > 0`).
+- [ ] Não há regressão no modo legado de serialização.
+- [ ] README atualizado com seção de operação por gamepad e por XR.
+
+---
+
 ## Referências
 
 - Engine GSplat API: https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/
 - Script system: https://developer.playcanvas.com/user-manual/scripting/
 - Exemplo shader-effects: `engine/examples/src/examples/gaussian-splatting/shader-effects.example.mjs`
 - Multi-splat vertex shader: `engine/examples/src/examples/gaussian-splatting/multi-splat.shader.glsl.vert`
+- Engine gamepad input: `engine/src/platform/input/game-pads.js`, `engine/src/platform/input/controller.js`
 - XR controllers script: `engine/scripts/esm/xr-controllers.mjs`
 - PlayCanvas Editor: https://github.com/playcanvas/editor
 - SuperSplat `window.scene` API (inferida do código): `supersplat/src/scene.ts`, `supersplat/src/splat.ts`

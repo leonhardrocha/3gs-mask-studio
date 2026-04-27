@@ -27,6 +27,7 @@
  */
 
 import * as pc from '../../engine/build/playcanvas.mjs';
+import { INPUT_MODE, PointerInputAdapter } from './input-pointer.mjs';
 
 export const BRIDGE_DEFAULT_URL = 'http://localhost:3001/process-mask';
 
@@ -117,6 +118,7 @@ VrMaskerScript.attributes.add('bridgeUrl',    { type: 'string', default: BRIDGE_
 VrMaskerScript.attributes.add('autoSendOnStop',{ type: 'boolean', default: true });
 VrMaskerScript.attributes.add('selectionChunkSize', { type: 'number', default: 20000 });
 VrMaskerScript.attributes.add('useSelectionWorker', { type: 'boolean', default: false });
+VrMaskerScript.attributes.add('inputMode', { type: 'string', default: INPUT_MODE.AUTO });
 
 VrMaskerScript.prototype.initialize = function () {
     /** @type {pc.Entity|null} */
@@ -131,21 +133,10 @@ VrMaskerScript.prototype.initialize = function () {
     this._selectionWorker = null;
     this._workerReady = false;
     this._workerPending = false;
+    this._workerOps = new Map();
 
-    // Botão de ativação desktop (Espaço)
-    this._keyboard = this.app.keyboard;
-    this._wasSpaceDown = false;
-
-    // XR input sources
-    this._xrSource = null;
-    if (this.app.xr) {
-        this.app.xr.input.on('add', (src) => {
-            if (!this._xrSource) this._xrSource = src;
-        });
-        this.app.xr.input.on('remove', (src) => {
-            if (this._xrSource === src) this._xrSource = null;
-        });
-    }
+    // Camada unificada de entrada (mouse + XR + fallback teclado)
+    this._pointer = new PointerInputAdapter(this.entity, this.app, this.inputMode);
 
     // Helper visual do cone (runtime). Em fase futura, o mesh virá do Editor.
     this._coneRoot = null;
@@ -166,14 +157,23 @@ VrMaskerScript.prototype.setSplatEntity = function (entity) {
 };
 
 VrMaskerScript.prototype.update = function (dt) {
-    // Detecta trigger
-    const spaceDown = this._keyboard?.isPressed(pc.KEY_SPACE) ?? false;
-    const xrTrigger = this._xrSource?.getButton(0) ?? false;
-    const triggerDown = spaceDown || xrTrigger;
+    this._pointer.setMode(this.inputMode);
+    this._pointer.update(dt);
+
+    const triggerDown = this._pointer.isSelectPressed();
+    const rangeDelta = this._pointer.consumeRangeDelta(0.1);
+    if (rangeDelta !== 0) {
+        this.coneRange = pc.math.clamp(this.coneRange + rangeDelta, 0.1, 50);
+    }
 
     if (triggerDown && !this._active) {
         this._active = true;
         this._scanCursor = 0;
+
+        if (this._pointer.getOperation() === 'set' && this._selected.size) {
+            this._selected.clear();
+            this.fire('selected:update', 0);
+        }
     }
 
     if (triggerDown && this._active) {
@@ -257,18 +257,14 @@ VrMaskerScript.prototype._syncConeHelper = function (isTriggerDown) {
     this._coneRoot.enabled = isTriggerDown;
     if (!isTriggerDown) return;
 
-    let position;
-    let rotation;
-    if (this._xrSource) {
-        position = this._xrSource.getPosition();
-        rotation = this._xrSource.getRotation();
-    } else {
-        position = this.entity.getPosition();
-        rotation = this.entity.getRotation();
-    }
+    const pose = this._pointer.getPose();
+    if (!pose?.origin || !pose?.direction) return;
 
-    this._coneRoot.setPosition(position);
-    this._coneRoot.setRotation(rotation);
+    this._coneRoot.setPosition(pose.origin);
+
+    const worldTarget = pose.origin.clone().add(pose.direction);
+    const up = new pc.Vec3(0, 1, 0);
+    this._coneRoot.lookAt(worldTarget, up);
 
     if (this._coneMaterial) {
         this._coneMaterial.setParameter('uConeRange', this.coneRange);
@@ -277,25 +273,11 @@ VrMaskerScript.prototype._syncConeHelper = function (isTriggerDown) {
 };
 
 VrMaskerScript.prototype._getConeParams = function () {
-    let apex, axis;
-
-    if (this._xrSource) {
-        apex = this._xrSource.getPosition();
-        const rot = this._xrSource.getRotation();
-        // eixo -Z local do controlador em world space
-        axis = new pc.Vec3(0, 0, -1);
-        const q = new pc.Quat(rot.x, rot.y, rot.z, rot.w);
-        q.transformVector(axis, axis);
-        axis.normalize();
-    } else {
-        // Fallback: câmera
-        apex = this.entity.getPosition().clone();
-        axis = new pc.Vec3();
-        this.entity.getWorldTransform().getZ(axis);
-        axis.scale(-1).normalize(); // -Z world = forward
-    }
-
-    return { apex, axis };
+    const pose = this._pointer.getPose();
+    return {
+        apex: pose.origin,
+        axis: pose.direction
+    };
 };
 
 VrMaskerScript.prototype._initSelectionWorker = function () {
@@ -314,11 +296,17 @@ VrMaskerScript.prototype._initSelectionWorker = function () {
 
             if (msg.type === 'selected') {
                 this._workerPending = false;
+                const op = this._workerOps.get(msg.requestId) || 'set';
+                this._workerOps.delete(msg.requestId);
                 const arr = msg.indices instanceof Uint32Array ? msg.indices : new Uint32Array(msg.indices || []);
                 let changed = false;
                 for (let i = 0; i < arr.length; i++) {
                     const idx = arr[i];
-                    if (!this._selected.has(idx)) {
+                    if (op === 'remove') {
+                        if (this._selected.delete(idx)) {
+                            changed = true;
+                        }
+                    } else if (!this._selected.has(idx)) {
                         this._selected.add(idx);
                         changed = true;
                     }
@@ -378,6 +366,7 @@ VrMaskerScript.prototype._doSelection = function () {
     const { apex, axis } = this._getConeParams();
     const tanAngle = Math.tan(this.coneAngleDeg * Math.PI / 180);
     const maxRange = this.coneRange;
+    const operation = this._pointer.getOperation();
 
     let changed = false;
     const count = splatData.numSplats;
@@ -388,6 +377,7 @@ VrMaskerScript.prototype._doSelection = function () {
     if (this._selectionWorker && this._workerReady && !this._workerPending) {
         this._workerPending = true;
         this._scanRequestId += 1;
+        this._workerOps.set(this._scanRequestId, operation);
         this._selectionWorker.postMessage({
             type: 'selectChunk',
             requestId: this._scanRequestId,
@@ -412,14 +402,24 @@ VrMaskerScript.prototype._doSelection = function () {
     const pw = new pc.Vec3();
 
     for (let i = start; i < end; i++) {
-        if (this._selected.has(i)) continue; // já selecionado
+        if (operation === 'remove') {
+            if (!this._selected.has(i)) continue;
+        } else if (this._selected.has(i)) {
+            continue;
+        }
 
         p.set(xArr[i], yArr[i], zArr[i]);
         worldMat.transformPoint(p, pw);
 
         if (pointInsideCone(pw, apex, axis, tanAngle, maxRange)) {
-            this._selected.add(i);
-            changed = true;
+            if (operation === 'remove') {
+                if (this._selected.delete(i)) {
+                    changed = true;
+                }
+            } else if (!this._selected.has(i)) {
+                this._selected.add(i);
+                changed = true;
+            }
         }
     }
 
@@ -469,10 +469,17 @@ VrMaskerScript.prototype.clearSelection = function () {
 };
 
 VrMaskerScript.prototype.destroy = function () {
+    if (this._pointer) {
+        this._pointer.destroy();
+        this._pointer = null;
+    }
+
     if (this._selectionWorker) {
         this._selectionWorker.terminate();
         this._selectionWorker = null;
         this._workerReady = false;
         this._workerPending = false;
     }
+
+    this._workerOps.clear();
 };

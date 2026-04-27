@@ -46,6 +46,7 @@ createOptions.graphicsDevice = device;
 createOptions.mouse    = new pc.Mouse(document.body);
 createOptions.touch    = new pc.TouchDevice(document.body);
 createOptions.keyboard = new pc.Keyboard(window);
+createOptions.gamepads = new pc.GamePads();
 
 createOptions.componentSystems = [
     pc.RenderComponentSystem,
