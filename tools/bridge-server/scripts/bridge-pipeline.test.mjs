@@ -174,6 +174,39 @@ describe('bridge pipeline', () => {
         });
     });
 
+    it('accepts {output} as mask step output alias in pipeline mode', async () => {
+        const env = {
+            PORT: '3196',
+            SELECT_CLI_CMD: `${process.execPath} "${ST_CLI}" -w {input} {selected}`,
+            MASK_CLI_CMD: `${process.execPath} "${ST_CLI}" -w {selected} -V opacity,gt,-1 {output}`,
+            EXPORT_CLI_CMD: `${process.execPath} "${ST_CLI}" -w {masked} {output}`,
+            MASK_KEEP_TEMP: 'true'
+        };
+
+        await withServer(env, async (port) => {
+            const response = await fetch(`http://127.0.0.1:${port}/process-mask`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/octet-stream',
+                    'x-input-filename': 'scene.ply'
+                },
+                body: buildValidPly()
+            });
+
+            const text = await response.text();
+            assert.equal(response.status, 200, text);
+            const json = JSON.parse(text);
+            assert.equal(json.ok, true);
+            assert.equal(Array.isArray(json.steps), true);
+            assert.equal(json.steps.length, 3, 'pipeline should execute 3 steps');
+
+            const maskStep = json.steps.find((step) => step.name === 'mask');
+            assert.ok(maskStep, 'mask step should be present');
+            assert.ok(fs.existsSync(maskStep.outputPath), 'mask step output should exist at {masked} path');
+            assert.ok(fs.existsSync(json.outputPath), 'final output should exist');
+        });
+    });
+
     it('uses configurable output suffix and extension', async () => {
         const env = {
             PORT: '3194',

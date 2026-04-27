@@ -60,6 +60,14 @@ const buildCommandFromTemplate = (cmdTemplate, values, appendArgs) => {
   return { ok: true, command };
 };
 
+const buildPipelineStepValues = (baseValues, stepInput, stepOutput) => {
+  return {
+    ...baseValues,
+    input: stepInput,
+    output: stepOutput
+  };
+};
+
 const execCommand = (command) => new Promise((resolve, reject) => {
   exec(
     command,
@@ -206,19 +214,20 @@ app.post('/process-mask', async (req, res) => {
     }
 
     const templates = [
-      ['select', mode.commands.select, selectedPath],
-      ['mask', mode.commands.mask, maskedPath],
-      ['export', mode.commands.exportCmd, outputPath]
+      { name: 'select', template: mode.commands.select, expectedOutput: selectedPath, stepInput: inputPath },
+      { name: 'mask', template: mode.commands.mask, expectedOutput: maskedPath, stepInput: selectedPath },
+      { name: 'export', template: mode.commands.exportCmd, expectedOutput: outputPath, stepInput: maskedPath }
     ];
 
-    for (const [name, template, expectedOutput] of templates) {
+    for (const { name, template, expectedOutput, stepInput } of templates) {
       if (!hasOverwriteFlag(template)) {
         return res.status(400).json({
           ok: false,
           error: `${name.toUpperCase()}_CLI_CMD must include -w or --overwrite.`
         });
       }
-      const built = buildCommandFromTemplate(template, templateValues);
+      const stepValues = buildPipelineStepValues(templateValues, stepInput, expectedOutput);
+      const built = buildCommandFromTemplate(template, stepValues);
       if (!built.ok) {
         return res.status(400).json({ ok: false, error: built.error });
       }

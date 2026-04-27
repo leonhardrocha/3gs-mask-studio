@@ -414,6 +414,9 @@ function injectPanel() {
             🔵 Cone Selector
             <span id="cone-close" style="float:right;cursor:pointer;opacity:0.6;">✕</span>
         </div>
+        <div id="gp-indicator" style="font-size:10px;color:#6b7280;margin-bottom:6px;">
+            🎮 desconectado
+        </div>
         <label>Ápice (x y z)</label><br>
         <input id="cs-apex" type="text" value="${defaultApex.join(' ')}"
             style="width:100%;background:#0a0a18;color:#e0e0e0;border:1px solid #334;
@@ -532,7 +535,197 @@ function injectPanel() {
     // Desenha o preview imediatamente ao abrir o painel
     pushPreview();
 
+    // Inicia loop de polling do gamepad (idempotente)
+    startGamepadLoop();
+
     console.log('[cone-selector] painel injetado com sucesso');
+}
+
+// ---------------------------------------------------------------------------
+// Gamepad polling — atualiza cone aim/apex em tempo real via navigator.getGamepads()
+// ---------------------------------------------------------------------------
+const GP_DEADZONE    = 0.12;
+const GP_AIM_SPEED   = 0.018;  // rad/frame @ deflexão máxima
+const GP_MOVE_SPEED  = 0.04;   // m/frame @ deflexão máxima
+const GP_ANGLE_SPEED = 0.5;    // °/frame @ deflexão máxima
+
+let gpLoopRunning = false;
+let gpPrevButtons = [];
+const OP_CYCLE = ['add', 'set', 'remove'];
+
+function gpDeadZone(v) {
+    if (Math.abs(v) < GP_DEADZONE) return 0;
+    return (v - Math.sign(v) * GP_DEADZONE) / (1 - GP_DEADZONE);
+}
+
+/** Rodrigues rotation of vector v around unit axis k by rad radians */
+function rotateVec(v, k, rad) {
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const dot = v[0] * k[0] + v[1] * k[1] + v[2] * k[2];
+    const cx  = k[1] * v[2] - k[2] * v[1];
+    const cy  = k[2] * v[0] - k[0] * v[2];
+    const cz  = k[0] * v[1] - k[1] * v[0];
+    return [
+        v[0] * cos + cx * sin + k[0] * dot * (1 - cos),
+        v[1] * cos + cy * sin + k[1] * dot * (1 - cos),
+        v[2] * cos + cz * sin + k[2] * dot * (1 - cos)
+    ];
+}
+
+function fmt3(arr) {
+    return arr.map(v => v.toFixed(3)).join(' ');
+}
+
+/** Sync panel text fields from previewState (called each frame there is gamepad input) */
+function updatePanelFromPreview() {
+    const apexEl  = document.getElementById('cs-apex');
+    const axisEl  = document.getElementById('cs-axis');
+    const angleEl = document.getElementById('cs-angle');
+    const angleValEl = document.getElementById('cs-angle-val');
+    const rangeEl = document.getElementById('cs-range');
+    const rangeValEl = document.getElementById('cs-range-val');
+    if (!apexEl) return;
+    apexEl.value = fmt3(previewState.apex);
+    axisEl.value = fmt3(previewState.axis);
+    if (angleEl) {
+        angleEl.value = previewState.angleDeg;
+        if (angleValEl) angleValEl.textContent = previewState.angleDeg.toFixed(1);
+    }
+    if (rangeEl) {
+        rangeEl.value = previewState.range;
+        if (rangeValEl) rangeValEl.textContent = previewState.range.toFixed(1);
+    }
+}
+
+function gpIsPressed(btn) { return btn?.pressed ?? false; }
+function gpJustPressed(btn, idx) {
+    const cur  = gpIsPressed(btn);
+    const prev = !!gpPrevButtons[idx];
+    return cur && !prev;
+}
+
+function startGamepadLoop() {
+    if (gpLoopRunning) return;
+    gpLoopRunning = true;
+
+    function loop() {
+        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+        let gp = null;
+        for (const g of gamepads) {
+            if (g && g.connected) { gp = g; break; }
+        }
+
+        const indicator = document.getElementById('gp-indicator');
+        if (indicator) {
+            indicator.style.color    = gp ? '#4ade80' : '#6b7280';
+            indicator.textContent    = gp ? `🎮 ${gp.id.slice(0, 24)}` : '🎮 desconectado';
+        }
+
+        if (gp) {
+            const axes    = gp.axes;
+            const buttons = gp.buttons;
+
+            // Right stick (axes 2/3) → aim direction (yaw / pitch)
+            const rstX = gpDeadZone(axes[2] ?? 0);
+            const rstY = gpDeadZone(axes[3] ?? 0);
+
+            // Left stick (axes 0/1) → apex movement (strafe / forward)
+            const lstX = gpDeadZone(axes[0] ?? 0);
+            const lstY = gpDeadZone(axes[1] ?? 0);
+
+            let dirty = false;
+
+            if (rstX !== 0 || rstY !== 0) {
+                let axis = previewState.axis.slice();
+                // Yaw: rotate around world Y
+                if (rstX !== 0) {
+                    axis = rotateVec(axis, [0, 1, 0], -rstX * GP_AIM_SPEED);
+                }
+                // Pitch: rotate around local right vector (perpendicular to axis in XZ)
+                if (rstY !== 0) {
+                    const right = norm([-axis[2], 0, axis[0]]);
+                    axis = rotateVec(axis, right, rstY * GP_AIM_SPEED);
+                }
+                previewState.axis = norm(axis);
+                dirty = true;
+            }
+
+            if (lstX !== 0 || lstY !== 0) {
+                const fwd   = previewState.axis;
+                const right = norm([-fwd[2], 0, fwd[0]]);
+                previewState.apex = [
+                    previewState.apex[0] + lstX * right[0] * GP_MOVE_SPEED - lstY * fwd[0] * GP_MOVE_SPEED,
+                    previewState.apex[1] + lstX * right[1] * GP_MOVE_SPEED - lstY * fwd[1] * GP_MOVE_SPEED,
+                    previewState.apex[2] + lstX * right[2] * GP_MOVE_SPEED - lstY * fwd[2] * GP_MOVE_SPEED
+                ];
+                dirty = true;
+            }
+
+            // LB (button 4) / RB (button 5) → adjust cone angle
+            if (gpIsPressed(buttons[4])) {
+                previewState.angleDeg = Math.max(1, previewState.angleDeg - GP_ANGLE_SPEED);
+                dirty = true;
+            }
+            if (gpIsPressed(buttons[5])) {
+                previewState.angleDeg = Math.min(90, previewState.angleDeg + GP_ANGLE_SPEED);
+                dirty = true;
+            }
+
+            // L3 (button 10) / R3 (button 11) → adjust range
+            if (gpIsPressed(buttons[10])) {
+                previewState.range = Math.max(0.1, previewState.range - 0.05);
+                dirty = true;
+            }
+            if (gpIsPressed(buttons[11])) {
+                previewState.range = Math.min(20, previewState.range + 0.05);
+                dirty = true;
+            }
+
+            // A/Cross (button 0) → apply selection (rising edge only)
+            if (gpJustPressed(buttons[0], 0)) {
+                const op = document.getElementById('cs-op')?.value ?? 'add';
+                const result = applyConeSeleciton(
+                    previewState.apex, previewState.axis,
+                    previewState.angleDeg, previewState.range, op
+                );
+                const statusEl = document.getElementById('cs-status');
+                if (statusEl) {
+                    statusEl.textContent = result.error
+                        ? `Erro: ${result.error}`
+                        : `✓ ${result.inside} / ${result.total} gaussianas (${op})`;
+                }
+            }
+
+            // B/Circle (button 1) → clear selection (rising edge)
+            if (gpJustPressed(buttons[1], 1)) {
+                document.getElementById('cs-clear')?.click();
+            }
+
+            // Y/Triangle (button 3) → cycle operation mode (rising edge)
+            if (gpJustPressed(buttons[3], 3)) {
+                const opEl = document.getElementById('cs-op');
+                if (opEl) {
+                    const cur = OP_CYCLE.indexOf(opEl.value);
+                    opEl.value = OP_CYCLE[(cur + 1) % OP_CYCLE.length];
+                }
+            }
+
+            gpPrevButtons = Array.from(buttons).map(b => b?.pressed ?? false);
+
+            if (dirty) {
+                updatePanelFromPreview();
+                installPreviewHook();
+                if (window.scene) window.scene.forceRender = true;
+            }
+        } else {
+            gpPrevButtons = [];
+        }
+
+        requestAnimationFrame(loop);
+    }
+
+    requestAnimationFrame(loop);
 }
 
 // ---------------------------------------------------------------------------

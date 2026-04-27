@@ -256,8 +256,11 @@ VrMaskerScript.prototype._initConeHelper = async function () {
 VrMaskerScript.prototype._syncConeHelper = function (isTriggerDown) {
     if (!this._coneRoot || !this._coneVisual) return;
 
-    this._coneRoot.enabled = isTriggerDown;
-    if (!isTriggerDown) return;
+    // Show cone when trigger is down OR when a gamepad/XR source is active (aim preview).
+    const sourceType = this._pointer?.getSourceType?.() ?? 'fallback';
+    const hasActiveInput = isTriggerDown || sourceType === 'gamepad' || sourceType === 'xr';
+    this._coneRoot.enabled = hasActiveInput;
+    if (!hasActiveInput) return;
 
     const pose = this._pointer.getPose();
     if (!pose?.origin || !pose?.direction) return;
@@ -272,7 +275,9 @@ VrMaskerScript.prototype._syncConeHelper = function (isTriggerDown) {
         this._coneMaterial.setParameter('uConeRange', this.coneRange);
         this._coneMaterial.setParameter('uConeAngleTan', Math.tan(this.coneAngleDeg * Math.PI / 180));
         const c = this._getOperationColor();
-        this._coneMaterial.setParameter('uConeColor', [c.r, c.g, c.b, c.a]);
+        // Use reduced alpha for aim-preview (no trigger), full alpha when selecting.
+        const alpha = isTriggerDown ? c.a : c.a * 0.4;
+        this._coneMaterial.setParameter('uConeColor', [c.r, c.g, c.b, alpha]);
     }
 };
 
