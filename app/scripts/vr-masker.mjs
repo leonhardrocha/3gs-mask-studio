@@ -182,12 +182,14 @@ VrMaskerScript.prototype.update = function (dt) {
 
     if (!triggerDown && this._active) {
         this._active = false;
+        this._pointer.pulseFeedback(0.25, 40).catch(() => {});
         if (this.autoSendOnStop) {
             this._sendToBridge();
         }
     }
 
     this._syncConeHelper(triggerDown);
+    this.fire('input:update', this.getInputDebugState());
 };
 
 VrMaskerScript.prototype._initConeHelper = async function () {
@@ -269,7 +271,30 @@ VrMaskerScript.prototype._syncConeHelper = function (isTriggerDown) {
     if (this._coneMaterial) {
         this._coneMaterial.setParameter('uConeRange', this.coneRange);
         this._coneMaterial.setParameter('uConeAngleTan', Math.tan(this.coneAngleDeg * Math.PI / 180));
+        const c = this._getOperationColor();
+        this._coneMaterial.setParameter('uConeColor', [c.r, c.g, c.b, c.a]);
     }
+};
+
+VrMaskerScript.prototype._getOperationColor = function () {
+    const op = this._pointer?.getOperation?.() || 'set';
+    if (op === 'add') return new pc.Color(0.22, 0.9, 0.32, 0.24);
+    if (op === 'remove') return new pc.Color(0.95, 0.22, 0.22, 0.24);
+    return new pc.Color(0.2, 0.8, 1.0, 0.22);
+};
+
+VrMaskerScript.prototype.getInputDebugState = function () {
+    const cursor = this._pointer?.getVirtualCursorPosition?.() || { x: 0, y: 0, active: false };
+    return {
+        sourceType: this._pointer?.getSourceType?.() || 'keyboard-fallback',
+        operation: this._pointer?.getOperation?.() || 'set',
+        coneRange: this.coneRange,
+        coneAngleDeg: this.coneAngleDeg,
+        selectedCount: this._selected.size,
+        cursorX: cursor.x,
+        cursorY: cursor.y,
+        cursorActive: Boolean(cursor.active)
+    };
 };
 
 VrMaskerScript.prototype._getConeParams = function () {

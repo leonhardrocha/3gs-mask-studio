@@ -20,6 +20,10 @@ import { VrMaskerScript, BRIDGE_DEFAULT_URL } from './scripts/vr-masker.mjs';
 // ---------------------------------------------------------------------------
 const statusEl = document.getElementById('status');
 const selectedEl = document.getElementById('selected-count');
+const inputSourceEl = document.getElementById('input-source');
+const inputOpEl = document.getElementById('input-op');
+const coneDebugEl = document.getElementById('cone-debug');
+const reticleEl = document.getElementById('reticle');
 const enterVrBtn = document.getElementById('enter-vr');
 
 function setStatus(msg) {
@@ -106,6 +110,31 @@ maskerInstance.on('bridge:success', (result) => {
 });
 maskerInstance.on('bridge:error', (err) => {
     setStatus(`Erro bridge: ${err}`);
+});
+maskerInstance.on('input:update', (state) => {
+    if (inputSourceEl) inputSourceEl.textContent = `Fonte: ${state.sourceType}`;
+    if (inputOpEl) inputOpEl.textContent = `Modo: ${state.operation}`;
+    if (coneDebugEl) {
+        coneDebugEl.textContent = `Cone: angle=${state.coneAngleDeg.toFixed(1)} range=${state.coneRange.toFixed(2)}`;
+    }
+
+    if (reticleEl && app.graphicsDevice && canvas) {
+        if (!state.cursorActive) {
+            reticleEl.style.display = 'none';
+            return;
+        }
+
+        const cssScaleX = app.graphicsDevice.width / Math.max(1, canvas.clientWidth);
+        const cssScaleY = app.graphicsDevice.height / Math.max(1, canvas.clientHeight);
+
+        const x = state.cursorX / cssScaleX;
+        const y = state.cursorY / cssScaleY;
+
+        reticleEl.style.display = 'block';
+        reticleEl.style.left = `${x}px`;
+        reticleEl.style.top = `${y}px`;
+        reticleEl.style.borderColor = state.operation === 'remove' ? '#f05050' : (state.operation === 'add' ? '#43d67a' : '#4ec9ff');
+    }
 });
 
 app.root.addChild(cameraEntity);

@@ -570,14 +570,14 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 > canvas do SuperSplat.
 
 - [ ] Desktop (gamepad na tela):
-  - [ ] Alavanca direita move cursor/retículo virtual no canvas.
-  - [ ] Botão primário confirma `set`; botão 1 ativa `add`; botão 2 ativa `remove`.
-  - [ ] Overlay de parâmetros em tempo real (`angle`, `range`, `selectedCount`, `mode`, `sourceType`).
-  - [ ] Ajuste de `coneRange` por eixo secundário ou bumpers, com deadzone e repetição controlada.
+  - [x] Alavanca direita move cursor/retículo virtual no canvas.
+  - [x] Botão primário confirma `set`; botão 1 ativa `add`; botão 2 ativa `remove`.
+  - [x] Overlay de parâmetros em tempo real (`angle`, `range`, `selectedCount`, `mode`, `sourceType`).
+  - [x] Ajuste de `coneRange` por eixo secundário ou bumpers, com deadzone e repetição controlada.
 - [ ] VR/XR:
-  - [ ] Ray visual do controlador com cor por modo (`set/add/remove`).
-  - [ ] Botão 1 = `add`, botão 2 = `remove`, usando o `gamepad` do `XRInputSource` quando disponível.
-  - [ ] Haptics curtos ao confirmar seleção (quando suportado).
+  - [x] Ray visual do controlador com cor por modo (`set/add/remove`).
+  - [x] Botão 1 = `add`, botão 2 = `remove`, usando o `gamepad` do `XRInputSource` quando disponível.
+  - [x] Haptics curtos ao confirmar seleção (quando suportado).
   - [ ] Zona morta e debounce para evitar spam de seleção por trigger/alavanca instáveis.
   - [ ] Mensagem clara quando sessão XR não possui input source ou layout de gamepad utilizável.
 - [ ] Wrapper `tools/cone-selector/index.html`:
@@ -590,7 +590,7 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 - [ ] Testes automatizados:
   - [x] `test:input-pointer` (mock de gamepad/xr e transição de estados).
   - [x] `test:virtual-cursor` (deadzone, clamp e mapeamento da alavanca direita).
-  - [ ] `test:cone-projection` (consistência do raio entre gamepad desktop e XR).
+  - [x] `test:cone-projection` (consistência do raio entre gamepad desktop e XR).
   - [x] `test:bridge-opacity-flow` (pipeline `SELECT -> MASK(-V opacity_raw,gt,T) -> EXPORT`).
 - [ ] Testes manuais (checklist):
   - [ ] Desktop com gamepad: selecionar, limpar e enviar ao bridge.

@@ -109,6 +109,48 @@ class PointerInputAdapter {
         };
     }
 
+    getVirtualCursorPosition() {
+        if (!this._virtualReady) {
+            const device = this.app?.graphicsDevice;
+            const width = Math.max(1, device?.width ?? 1);
+            const height = Math.max(1, device?.height ?? 1);
+            return {
+                x: width * 0.5,
+                y: height * 0.5,
+                active: false
+            };
+        }
+
+        return {
+            x: this._virtualX,
+            y: this._virtualY,
+            active: this._activeSourceType === 'gamepad'
+        };
+    }
+
+    pulseFeedback(intensity = 0.35, duration = 45) {
+        const sourceType = this._activeSourceType;
+
+        if (sourceType === 'gamepad') {
+            const pad = this._getDesktopGamepad();
+            if (pad?.pulse) {
+                return pad.pulse(intensity, duration);
+            }
+            return Promise.resolve(false);
+        }
+
+        if (sourceType === 'xr-left' || sourceType === 'xr-right') {
+            const src = this._getXrSource();
+            const gp = src?.gamepad;
+            const actuators = gp?.hapticActuators || [];
+            if (actuators.length && typeof actuators[0]?.pulse === 'function') {
+                return actuators[0].pulse(intensity, duration);
+            }
+        }
+
+        return Promise.resolve(false);
+    }
+
     consumeRangeDelta(step = 0.1) {
         if (!Number.isFinite(step) || step <= 0) step = 0.1;
         if (this._rangeDeltaAccum === 0) return 0;
