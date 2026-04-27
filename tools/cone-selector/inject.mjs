@@ -728,6 +728,112 @@ function startGamepadLoop() {
     requestAnimationFrame(loop);
 }
 
+function resolveXrCameraComponent() {
+    const scene = window.scene;
+    const app = scene?.app;
+
+    const direct = scene?.camera?.camera
+        || scene?.cameraEntity?.camera
+        || scene?.camera?.entity?.camera;
+    if (direct) return direct;
+
+    const list = app?.root?.findComponents?.('camera');
+    if (Array.isArray(list) && list.length) return list[0];
+
+    return null;
+}
+
+function getXrTypeConst(type) {
+    if (window.pc?.XRTYPE_VR && type === 'immersive-vr') return window.pc.XRTYPE_VR;
+    if (window.pc?.XRTYPE_AR && type === 'immersive-ar') return window.pc.XRTYPE_AR;
+    return type;
+}
+
+function getXrSpaceConst(space) {
+    if (window.pc?.XRSPACE_LOCALFLOOR && space === 'local-floor') return window.pc.XRSPACE_LOCALFLOOR;
+    if (window.pc?.XRSPACE_LOCAL && space === 'local') return window.pc.XRSPACE_LOCAL;
+    if (window.pc?.XRSPACE_VIEWER && space === 'viewer') return window.pc.XRSPACE_VIEWER;
+    return space;
+}
+
+function getXrStatus() {
+    const app = window.scene?.app;
+    const xr = app?.xr;
+    if (!xr) {
+        return {
+            ok: false,
+            supported: false,
+            active: false,
+            availableVr: false,
+            reason: 'xr-manager-missing',
+            message: 'XR manager não disponível neste runtime do SuperSplat (build sem XrManager).'
+        };
+    }
+
+    const vrType = getXrTypeConst('immersive-vr');
+    const supported = Boolean(xr.supported);
+    const availableVr = supported && typeof xr.isAvailable === 'function' ? xr.isAvailable(vrType) : false;
+
+    return {
+        ok: true,
+        supported,
+        active: Boolean(xr.active),
+        availableVr,
+        type: xr.type || xr._type || null,
+        spaceType: xr.spaceType || xr._spaceType || null
+    };
+}
+
+function startXrSession({ type = 'immersive-vr', space = 'local-floor' } = {}) {
+    return new Promise((resolve, reject) => {
+        const app = window.scene?.app;
+        const xr = app?.xr;
+        if (!xr) {
+            reject(new Error('XR manager não disponível neste runtime do SuperSplat (build sem XrManager).'));
+            return;
+        }
+
+        const xrType = getXrTypeConst(type);
+        const xrSpace = getXrSpaceConst(space);
+        const camera = resolveXrCameraComponent();
+
+        if (!xr.supported) {
+            reject(new Error('WebXR não suportado neste navegador/contexto.'));
+            return;
+        }
+        if (!camera) {
+            reject(new Error('Nenhuma câmera encontrada para iniciar sessão XR.'));
+            return;
+        }
+        if (typeof xr.isAvailable === 'function' && !xr.isAvailable(xrType)) {
+            reject(new Error(`Sessão XR indisponível para tipo "${xrType}".`));
+            return;
+        }
+
+        xr.start(camera, xrType, xrSpace, {
+            callback: (err) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    if (window.scene) window.scene.forceRender = true;
+                    resolve(getXrStatus());
+                }
+            }
+        });
+    });
+}
+
+function endXrSession() {
+    const app = window.scene?.app;
+    const xr = app?.xr;
+    if (!xr) return { ok: false, message: 'XR manager não disponível no app atual.' };
+    if (xr.active && typeof xr.end === 'function') {
+        xr.end();
+    }
+    if (window.scene) window.scene.forceRender = true;
+    return getXrStatus();
+}
+
 // ---------------------------------------------------------------------------
 // postMessage bridge — permite controle cross-origin a partir do wrapper
 // ---------------------------------------------------------------------------
@@ -805,6 +911,35 @@ window.addEventListener('message', (event) => {
     if (cmd === 'preview') {
         updatePreview(payload ?? {});
         reply({ ok: true });
+        return;
+    }
+
+    if (cmd === 'xrStatus') {
+        reply(getXrStatus());
+        return;
+    }
+
+    if (cmd === 'xrStart') {
+        startXrSession(payload ?? {})
+            .then((status) => reply({ ok: true, ...status }))
+            .catch((err) => reply({ error: err?.message || String(err) }));
+        return;
+    }
+
+    if (cmd === 'xrEnd') {
+        reply(endXrSession());
+        return;
+    }
+
+    if (cmd === 'xrToggle') {
+        const xr = window.scene?.app?.xr;
+        if (xr?.active) {
+            reply(endXrSession());
+            return;
+        }
+        startXrSession(payload ?? {})
+            .then((status) => reply({ ok: true, ...status }))
+            .catch((err) => reply({ error: err?.message || String(err) }));
         return;
     }
 });

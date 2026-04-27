@@ -2,6 +2,7 @@
 engine/
 splat-transform/
 supersplat/
+editor/
 
 # Local dependencies and temp artifacts
 tools/bridge-server/node_modules/

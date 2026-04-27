@@ -144,12 +144,12 @@
     <div class="section">
       <label>URL SuperSplat</label>
       <div id="splat-url-bar">
-        <input id="supersplat-url" type="text" value="http://localhost:8080/supersplat/dist/" />
+        <input id="supersplat-url" type="text" value="" placeholder="(auto) /supersplat/dist/?nosw=1" />
         <button onclick="loadSuperSplat()">▶</button>
       </div>
       <label>Splat URL (para carregar via ?load=)</label>
       <input id="splat-url" type="text"
-        value="http://localhost:8080/tools/bridge-server/sample.ply"
+        value=""
         placeholder="http://...sample.ply" />
       <button class="btn btn-gray" onclick="openWithSplat()">Abrir com splat</button>
     </div>
@@ -183,6 +183,22 @@
 
     <!-- Ações -->
     <div class="section">
+      <label>Modo de entrada</label>
+      <select id="input-mode">
+        <option value="auto" selected>Auto</option>
+        <option value="gamepad">Gamepad</option>
+        <option value="xr">XR</option>
+      </select>
+      <label>Fonte ativa</label>
+      <input id="active-source" type="text" value="desconhecida" readonly />
+      <label>XR</label>
+      <button class="btn btn-blue" onclick="startXr()">Entrar em XR (VR)</button>
+      <button class="btn btn-red" onclick="endXr()">Sair do XR</button>
+      <button class="btn btn-gray" onclick="toggleXr()">Alternar XR (tecla V)</button>
+      <button class="btn btn-gray" onclick="openStandaloneXrApp()">Abrir app XR standalone</button>
+    </div>
+
+    <div class="section">
       <button class="btn btn-blue" onclick="doSelect()">Selecionar</button>
       <button class="btn btn-gray" onclick="doClear()">Limpar seleção</button>
       <button class="btn btn-green" onclick="doSend()">Enviar ao Bridge</button>
@@ -200,7 +216,7 @@
 
   <!-- Área do iframe SuperSplat -->
   <div id="frame-wrap">
-    <iframe id="supersplat-frame" src="http://localhost:8080/supersplat/dist/"
+    <iframe id="supersplat-frame" src=""
       allow="xr-spatial-tracking; camera; microphone"
       sandbox="allow-scripts allow-same-origin allow-forms allow-popups">
     </iframe>
@@ -246,6 +262,23 @@ function setStatus(msg) {
     console.log('[wrapper]', msg);
 }
 
+function setActiveSource(label) {
+  const el = document.getElementById('active-source');
+  if (el) el.value = label;
+}
+
+function getCurrentSplatUrl() {
+  return document.getElementById('splat-url')?.value?.trim() || '';
+}
+
+function openStandaloneXrApp() {
+  const splat = getCurrentSplatUrl();
+  const appUrl = new URL(`${window.location.origin}/app/`);
+  if (splat) appUrl.searchParams.set('splat', splat);
+  window.open(appUrl.toString(), '_blank', 'noopener,noreferrer');
+  setStatus('Abrindo app standalone com suporte XR em nova aba...');
+}
+
 function getFrameDocument() {
   const frame = document.getElementById('supersplat-frame');
   try {
@@ -261,8 +294,11 @@ function getFrameDocument() {
 function loadSuperSplat() {
   const raw = document.getElementById('supersplat-url').value.trim();
   const url = normalizeSupersplatUrl(raw || `${window.location.origin}/supersplat/dist/`);
-    document.getElementById('supersplat-frame').src = url;
-    setStatus(`Carregando: ${url}`);
+  const u = new URL(url);
+  u.searchParams.set('nosw', '1');
+  const finalUrl = u.toString();
+  document.getElementById('supersplat-frame').src = finalUrl;
+  setStatus(`Carregando: ${finalUrl}`);
 }
 
 function normalizeSupersplatUrl(rawUrl) {
@@ -296,6 +332,7 @@ function openWithSplat() {
   const u = new URL(base);
   const filename = splat.split('/').pop() || 'sample.ply';
 
+  u.searchParams.set('nosw', '1');
   u.searchParams.delete('load');
   u.searchParams.delete('filename');
   u.searchParams.append('load', splat);
@@ -366,6 +403,74 @@ async function pushPreviewToIframe() {
   }
 }
 
+function getInputModeLabel() {
+  const mode = document.getElementById('input-mode')?.value || 'auto';
+  if (mode === 'xr') return 'xr';
+  if (mode === 'gamepad') return 'gamepad';
+  return 'auto';
+}
+
+async function refreshXrStatus(silent = true) {
+  try {
+    const r = await sendCmd('xrStatus', {}, 1200);
+    const mode = getInputModeLabel();
+    if (mode === 'xr') {
+      setActiveSource(r.active ? `xr:${r.type || 'immersive-vr'}` : 'xr:inativo');
+    } else if (mode === 'gamepad') {
+      setActiveSource('gamepad');
+    } else {
+      setActiveSource(r.active ? `xr:${r.type || 'immersive-vr'}` : 'auto');
+    }
+
+    if (!silent && !r.active) {
+      setStatus(`XR pronto: supported=${r.supported} availableVr=${r.availableVr}`);
+    }
+    return r;
+  } catch (_e) {
+    if (!silent) setStatus('XR status indisponível (inject.mjs não ativo ou cross-origin).');
+    const mode = getInputModeLabel();
+    setActiveSource(mode === 'xr' ? 'xr:indisponível' : mode);
+    return null;
+  }
+}
+
+async function startXr() {
+  setStatus('Iniciando sessão XR...');
+  try {
+    const r = await sendCmd('xrStart', { type: 'immersive-vr', space: 'local-floor' }, 10000);
+    setActiveSource(`xr:${r.type || 'immersive-vr'}`);
+    setStatus('Sessão XR iniciada com sucesso.');
+  } catch (e) {
+        const msg = String(e?.message || e);
+        if (msg.includes('XR manager não disponível')) {
+          setStatus('Falha ao iniciar XR: este build do SuperSplat não expõe XrManager. Use "Abrir app XR standalone" para VR.');
+        } else {
+          setStatus(`Falha ao iniciar XR: ${msg}`);
+        }
+  }
+}
+
+async function endXr() {
+  try {
+    await sendCmd('xrEnd', {}, 4000);
+    setActiveSource(getInputModeLabel() === 'xr' ? 'xr:inativo' : getInputModeLabel());
+    setStatus('Sessão XR encerrada.');
+  } catch (e) {
+    setStatus(`Falha ao encerrar XR: ${e.message}`);
+  }
+}
+
+async function toggleXr() {
+  try {
+    const r = await sendCmd('xrToggle', { type: 'immersive-vr', space: 'local-floor' }, 10000);
+    const isActive = Boolean(r.active);
+    setActiveSource(isActive ? `xr:${r.type || 'immersive-vr'}` : 'xr:inativo');
+    setStatus(isActive ? 'XR ativado.' : 'XR desativado.');
+  } catch (e) {
+    setStatus(`Falha no toggle XR: ${e.message}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Ações via postMessage RPC
 // ---------------------------------------------------------------------------
@@ -422,11 +527,47 @@ document.getElementById('cs-axis').addEventListener('change', pushPreviewToIfram
 document.getElementById('cs-angle').addEventListener('input', pushPreviewToIframe);
 document.getElementById('cs-range').addEventListener('input', pushPreviewToIframe);
 document.getElementById('cs-preview').addEventListener('change', pushPreviewToIframe);
+document.getElementById('input-mode').addEventListener('change', () => {
+  refreshXrStatus(true);
+});
+
+window.addEventListener('keydown', (evt) => {
+  if (evt.key?.toLowerCase() !== 'v') return;
+  const targetTag = evt.target?.tagName?.toLowerCase();
+  if (targetTag === 'input' || targetTag === 'textarea' || targetTag === 'select') return;
+  toggleXr();
+});
 
 // Quando o iframe recarrega, tenta reaplicar preview automaticamente
 document.getElementById('supersplat-frame').addEventListener('load', () => {
-  setTimeout(pushPreviewToIframe, 400);
+  setTimeout(() => {
+    pushPreviewToIframe();
+    refreshXrStatus(true);
+  }, 400);
 });
+
+setInterval(() => {
+  refreshXrStatus(true);
+}, 1500);
+
+(() => {
+  const supersplatInput = document.getElementById('supersplat-url');
+  const splatInput = document.getElementById('splat-url');
+  const defaultSupersplat = `${window.location.origin}/supersplat/dist/?nosw=1`;
+  const defaultSplat = `${window.location.origin}/tools/bridge-server/sample.ply`;
+
+  if (supersplatInput && !supersplatInput.value.trim()) {
+    supersplatInput.value = defaultSupersplat;
+  }
+  if (splatInput && !splatInput.value.trim()) {
+    splatInput.value = defaultSplat;
+  }
+
+  // Carrega automaticamente o Supersplat com no-service-worker em ambiente local.
+  loadSuperSplat();
+})();
+
+refreshXrStatus(true);
 </script>
 </body>
 </html>

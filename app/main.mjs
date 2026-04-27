@@ -38,7 +38,8 @@ const canvas = document.getElementById('application-canvas');
 
 const device = await pc.createGraphicsDevice(canvas, {
     deviceTypes: ['webgl2', 'webgl1'],
-    antialias: false   // GSplat não se beneficia de MSAA
+    antialias: false,   // GSplat não se beneficia de MSAA
+    xrCompatible: true
 });
 device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
 
@@ -51,6 +52,7 @@ createOptions.mouse    = new pc.Mouse(document.body);
 createOptions.touch    = new pc.TouchDevice(document.body);
 createOptions.keyboard = new pc.Keyboard(window);
 createOptions.gamepads = new pc.GamePads();
+createOptions.xr = pc.XrManager;
 
 createOptions.componentSystems = [
     pc.RenderComponentSystem,
@@ -177,13 +179,59 @@ if (splatUrl) {
 // ---------------------------------------------------------------------------
 // Botão de entrada em VR
 // ---------------------------------------------------------------------------
+const xrLocalFloor = pc.XRSPACE_LOCALFLOOR || 'local-floor';
+
 if (app.xr && app.xr.supported) {
+    const updateVrButton = () => {
+        if (app.xr.active) {
+            enterVrBtn.textContent = 'Sair do VR';
+            enterVrBtn.disabled = false;
+            return;
+        }
+
+        const available = typeof app.xr.isAvailable === 'function'
+            ? app.xr.isAvailable(pc.XRTYPE_VR)
+            : false;
+
+        enterVrBtn.textContent = available ? 'Entrar em VR' : 'VR indisponível no runtime';
+        enterVrBtn.disabled = !available;
+    };
+
+    updateVrButton();
+
+    app.xr.on('start', () => {
+        setStatus('Sessão VR iniciada.');
+        updateVrButton();
+    });
+
+    app.xr.on('end', () => {
+        setStatus('Sessão VR encerrada.');
+        updateVrButton();
+    });
+
+    app.xr.on(`available:${pc.XRTYPE_VR}`, () => {
+        updateVrButton();
+    });
+
     enterVrBtn.addEventListener('click', () => {
-        app.xr.start(cameraEntity.camera, pc.XRTYPE_VR, pc.XRSPACE_LOCAL_FLOOR, {
-            callback: (err) => {
-                if (err) setStatus(`Erro XR: ${err.message}`);
+        if (!app.xr.active) {
+            if (!app.xr.isAvailable(pc.XRTYPE_VR)) {
+                setStatus('VR indisponível: verifique headset conectado e runtime OpenXR ativo (SteamVR).');
+                updateVrButton();
+                return;
             }
-        });
+
+            app.xr.start(cameraEntity.camera, pc.XRTYPE_VR, xrLocalFloor, {
+                callback: (err) => {
+                    if (err) {
+                        setStatus(`Erro XR: ${err.message}`);
+                    }
+                    updateVrButton();
+                }
+            });
+        } else {
+            app.xr.end();
+        }
     });
 } else {
     enterVrBtn.textContent = 'WebXR não disponível';

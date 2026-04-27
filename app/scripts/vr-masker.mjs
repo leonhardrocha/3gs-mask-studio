@@ -258,7 +258,12 @@ VrMaskerScript.prototype._syncConeHelper = function (isTriggerDown) {
 
     // Show cone when trigger is down OR when a gamepad/XR source is active (aim preview).
     const sourceType = this._pointer?.getSourceType?.() ?? 'fallback';
-    const hasActiveInput = isTriggerDown || sourceType === 'gamepad' || sourceType === 'xr';
+    const hasActiveInput =
+        isTriggerDown ||
+        sourceType === 'gamepad' ||
+        sourceType === 'xr' ||
+        sourceType === 'xr-left' ||
+        sourceType === 'xr-right';
     this._coneRoot.enabled = hasActiveInput;
     if (!hasActiveInput) return;
 

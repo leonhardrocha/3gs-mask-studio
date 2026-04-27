@@ -581,8 +581,8 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
   - [ ] Zona morta e debounce para evitar spam de seleção por trigger/alavanca instáveis.
   - [ ] Mensagem clara quando sessão XR não possui input source ou layout de gamepad utilizável.
 - [ ] Wrapper `tools/cone-selector/index.html`:
-  - [ ] Botão explícito de modo de entrada: `Auto | Gamepad | XR`.
-  - [ ] Indicador de fonte ativa (`gamepad`, `xr-left`, `xr-right`, `hmd`).
+  - [x] Botão explícito de modo de entrada: `Auto | Gamepad | XR`.
+  - [x] Indicador de fonte ativa (`gamepad`, `xr-left`, `xr-right`, `hmd`).
   - [ ] Comando `serializeFull` exposto na UI com parâmetros:
     - `selectedOpacityRaw`
     - `unselectedOpacityRaw`
@@ -593,7 +593,7 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
   - [x] `test:cone-projection` (consistência do raio entre gamepad desktop e XR).
   - [x] `test:bridge-opacity-flow` (pipeline `SELECT -> MASK(-V opacity_raw,gt,T) -> EXPORT`).
 - [ ] Testes manuais (checklist):
-  - [ ] Desktop com gamepad: selecionar, limpar e enviar ao bridge.
+  - [x] Desktop com gamepad: selecionar, limpar e enviar ao bridge.
   - [ ] XR com 1 controlador: seleção contínua e envio ao bridge.
   - [ ] XR com 2 controladores: prioridade do dominante.
   - [ ] Queda de controlador em runtime: fallback para HMD/câmera sem travar.
@@ -603,6 +603,128 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 - [ ] Fluxo desktop com gamepad e fluxo XR produzem saída válida no bridge (`ok: true`, `outputBytes > 0`).
 - [ ] Não há regressão no modo legado de serialização.
 - [ ] README atualizado com seção de operação por gamepad e por XR.
+
+---
+
+### Fase 14 — Rendering XR/VR no Cone Selector (Wrapper + Inject)
+
+> Objetivo: incorporar inicialização/encerramento de sessão XR diretamente no
+> fluxo do `tools/cone-selector/`, mantendo o SuperSplat sem alteração de fonte
+> e seguindo o padrão sugerido em `vrxr_input.md` (start por interação de UI,
+> verificação de disponibilidade e câmera válida).
+
+- [x] `tools/cone-selector/inject.mjs`:
+  - [x] Expor RPC `xrStatus` para consultar `supported`, `availableVr` e `active`.
+  - [x] Expor RPC `xrStart` com `{ type: 'immersive-vr', space: 'local-floor' }`.
+  - [x] Expor RPC `xrEnd` e `xrToggle` para controle de ciclo da sessão.
+  - [x] Resolver câmera de forma robusta (`scene.camera`, `cameraEntity` ou `root.findComponents('camera')`).
+  - [x] Retornar erros claros quando WebXR não estiver disponível.
+- [x] `tools/cone-selector/index.html`:
+  - [x] Adicionar botões de UI: `Entrar em XR (VR)`, `Sair do XR`, `Alternar XR`.
+  - [x] Adicionar atalho de teclado `V` para alternar sessão XR.
+  - [x] Adicionar indicador de fonte ativa no sidebar (`auto | gamepad | xr`).
+  - [x] Sincronizar status XR periodicamente via `postMessage` RPC.
+
+#### Critérios de aceite da Fase 14
+
+- [ ] Em navegador compatível + headset conectado, iniciar XR via botão sem abrir DevTools.
+- [ ] Encerrar XR sem recarregar iframe nem perder estado da UI do cone selector.
+- [ ] Quando XR indisponível, exibir mensagem de erro clara no status do wrapper.
+
+---
+
+### Fase 15 — Build custom do SuperSplat com XR habilitado
+
+> Objetivo: remover o bloqueio estrutural de XR no runtime do SuperSplat usado
+> no iframe do wrapper, mantendo o injector atual e habilitando a sessão VR no
+> próprio `window.scene.app`.
+
+- [x] Alterar `supersplat/src/main.ts` para criar `GraphicsDevice` com `xrCompatible: true`.
+- [x] Alterar `supersplat/src/pc-app.ts` para habilitar `appOptions.xr = XrManager`.
+- [x] Rebuildar distribuição do SuperSplat:
+  ```bash
+  cd supersplat
+  npm run build
+  ```
+- [x] Manter compatibilidade com o injector atual (`tools/cone-selector/inject.mjs`) sem remover fallback.
+
+#### Critérios de aceite da Fase 15
+
+- [x] `window.scene.app.xr` disponível no build custom do SuperSplat.
+- [ ] Fluxo de `xrStart` no wrapper válido com headset conectado e permissão concedida.
+- [x] Fluxo fallback para app standalone permanece funcional quando XR não estiver disponível no navegador/dispositivo.
+
+---
+
+### Fase 16 — Estabilização XR (Grid, Pipeline e Input)
+
+> Objetivo: consolidar a experiência XR para que a mesma cena do SuperSplat
+> seja renderizada no headset com controles equivalentes ao gamepad desktop,
+> reduzindo discrepâncias entre runtime desktop e VR.
+
+- [x] Corrigir pipeline XR para evitar black screen após transição desktop → XR.
+  - Ajuste no render path para manter passes necessários de splat/composição durante XR.
+- [x] Manter render contínuo durante sessão XR para acompanhar pose de cabeça/controlador.
+- [x] Corrigir grid no XR para seguir a câmera/olho ativo (evitar grid “fixo” em world-space indevido).
+- [x] Ajustar mapeamento de botões/eixos XR para ficar mais próximo do comportamento de gamepad.
+- [x] Habilitar `xrCompatible` + `XrManager` também no app standalone (`app/`) para botão VR.
+- [x] Mitigar cache stale via Service Worker no fluxo local (`nosw=1` e unregister em localhost).
+
+#### Critérios de aceite da Fase 16
+
+- [x] Entrar em XR não apaga a cena imediatamente após o primeiro frame.
+- [x] Grid do SuperSplat acompanha corretamente a câmera XR.
+- [ ] Controles XR reproduzem integralmente as ações esperadas de gamepad em todos os perfis de headset/controlador.
+- [ ] Botão VR do app standalone entra em sessão XR em ambiente WebXR válido sem ações extras.
+
+---
+
+## Pausa Técnica — Estado Atual
+
+### Resumo do que já foi feito
+
+- Wrapper de cone com controle de sessão XR (`xrStart`, `xrEnd`, `xrToggle`) via `postMessage`.
+- Build custom do SuperSplat com suporte XR habilitado.
+- Correções de render XR (pipeline, render contínuo, grid no XR).
+- Correções de input unificado (gamepad + XR) e feedback visual do cone.
+- Fluxo local com bypass de Service Worker para evitar bundle antigo durante iteração.
+
+### Problemas ainda em aberto
+
+- Comportamento de controles XR ainda pode variar por perfil de headset/controlador.
+- Botão VR no app standalone pode depender de condições de runtime (OpenXR/SteamVR/browser/gesto do usuário) mesmo com código ajustado.
+
+### Próximos passos recomendados
+
+1. Rodar matriz de testes por headset/controlador (Quest Link, Index, WMR) com log de mapeamento de botões/eixos.
+2. Adicionar telemetria em overlay para `sourceType`, `buttons`, `axes`, `xr.active`, `xr.type`, `xr.spaceType`.
+3. Congelar mapeamento por perfil de device (fallback em cadeia) e documentar no README.
+4. Fechar checklist manual de Fase 13/14/16 e promover critérios pendentes para concluídos.
+
+---
+
+## Guia Rápido — Como entrar em VR/XR pela interface
+
+### Pré-requisitos
+
+- Headset conectado e reconhecido pelo runtime WebXR.
+- SteamVR ativo (quando aplicável) e runtime OpenXR configurado.
+- Página servida em `localhost` (ou HTTPS) para permissões WebXR.
+
+### Fluxo pelo wrapper (`tools/cone-selector/`)
+
+1. Abrir: `http://localhost:8080/tools/cone-selector/`
+2. Confirmar URL do SuperSplat no campo lateral (preferencialmente com `?nosw=1`).
+3. Clicar em **Abrir com splat**.
+4. Clicar em **Injetar Cone Selector** (se ainda não estiver ativo).
+5. Definir modo em **XR** e clicar em **Entrar em XR (VR)**.
+6. Para sair, usar **Sair do XR** (ou **Alternar XR** / tecla `V`).
+
+### Fluxo pelo app standalone (`app/`)
+
+1. Abrir: `http://localhost:8080/app/?splat=http://localhost:8080/tools/bridge-server/sample.ply`
+2. Clicar em **Entrar em VR**.
+3. Se não iniciar, validar disponibilidade no runtime WebXR (browser + OpenXR/SteamVR + permissões).
 
 ---
 

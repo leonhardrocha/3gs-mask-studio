@@ -311,13 +311,22 @@ class PointerInputAdapter {
             const src = this._getXrSource();
             const gp = src?.gamepad || null;
 
-            const addPressed = this._xrButtonPressed(src, gp, 1);
-            const removePressed = this._xrButtonPressed(src, gp, 2);
-            const triggerPressed = this._xrButtonPressed(src, gp, 0);
+            // Cross-profile fallback mapping:
+            // trigger/select: 0
+            // add: A/X or squeeze: 1 or 4
+            // remove: B/Y or secondary squeeze/menu: 2 or 5
+            const addPressed = this._xrButtonPressed(src, gp, 1) || this._xrButtonPressed(src, gp, 4);
+            const removePressed = this._xrButtonPressed(src, gp, 2) || this._xrButtonPressed(src, gp, 5);
+            const triggerPressed = this._xrButtonPressed(src, gp, 0) || Boolean(src?.selecting);
 
             let rangeAxis = 0;
-            if (gp?.axes?.length >= 4) {
-                rangeAxis = Number(gp.axes[3] ?? 0);
+            if (gp?.axes?.length) {
+                // Use the best available vertical axis from thumbstick/touchpad.
+                if (gp.axes.length >= 4) {
+                    rangeAxis = Number(gp.axes[3] ?? 0);
+                } else if (gp.axes.length >= 2) {
+                    rangeAxis = Number(gp.axes[1] ?? 0);
+                }
             }
 
             return {
