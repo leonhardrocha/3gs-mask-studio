@@ -27,12 +27,21 @@ import { sendOpacityFilteredPlyToBridge } from './serialize-selected-full.mjs';
 const BRIDGE_URL = 'http://localhost:3001/process-mask';
 
 const PREVIEW_SEGMENTS = 32;
+const NAV_GLYPH_RADIUS = 0.25;
+const NAV_GLYPH_SEGMENTS = 40;
 const previewState = {
     enabled: true,
     apex: [0, 0, 3],
     axis: [0, 0, -1],
     angleDeg: 30,
-    range: 5
+    range: 5,
+    poseSpace: 'data' // 'data' (UI/manual) or 'render' (XR runtime pose)
+};
+
+const navDebugState = {
+    enabled: false,
+    axis: [0, 0], // [x, z]
+    source: 'none'
 };
 
 let previewHookInstalled = false;
@@ -118,23 +127,67 @@ function buildConeLineArrays(apex, axis, angleDeg, range, segments = PREVIEW_SEG
     return { positions, colors };
 }
 
+function buildNavAxisDiskLineArrays(axis, radius = NAV_GLYPH_RADIUS, segments = NAV_GLYPH_SEGMENTS) {
+    const cx = axis[0] ?? 0;
+    const cz = axis[1] ?? 0;
+    const cy = 0;
+
+    const positions = [];
+    const colors = [];
+    const ringColor = [0.95, 0.25, 0.25, 1.0];
+    const crossColor = [1.0, 0.95, 0.2, 1.0];
+
+    const pushLine = (a, b, color) => {
+        positions.push(a[0], a[1], a[2], b[0], b[1], b[2]);
+        colors.push(color[0], color[1], color[2], color[3], color[0], color[1], color[2], color[3]);
+    };
+
+    let prev = null;
+    for (let i = 0; i <= segments; i++) {
+        const t = (i / segments) * Math.PI * 2;
+        const p = [
+            cx + Math.cos(t) * radius,
+            cy,
+            cz + Math.sin(t) * radius
+        ];
+        if (prev) pushLine(prev, p, ringColor);
+        prev = p;
+    }
+
+    const c = [cx, cy, cz];
+    pushLine([c[0] - 0.03, c[1], c[2]], [c[0] + 0.03, c[1], c[2]], crossColor);
+    pushLine([c[0], c[1], c[2] - 0.03], [c[0], c[1], c[2] + 0.03], crossColor);
+
+    return { positions, colors };
+}
+
 function drawPreviewCone() {
-    if (!previewState.enabled) return;
     const scene = window.scene;
     const app = scene?.app;
     if (!scene || !app) return;
 
-    const { positions, colors } = buildConeLineArrays(
-        toPreviewRenderPoint(previewState.apex),
-        toPreviewRenderAxis(previewState.axis),
-        previewState.angleDeg,
-        previewState.range
-    );
-
-    if (!positions.length) return;
-
     const layer = scene.gizmoLayer ?? app.scene.defaultDrawLayer;
-    app.drawLineArrays(positions, colors, true, layer);
+
+    if (previewState.enabled) {
+        const apex = previewState.poseSpace === 'render'
+            ? previewState.apex
+            : toPreviewRenderPoint(previewState.apex);
+        const axis = previewState.poseSpace === 'render'
+            ? previewState.axis
+            : toPreviewRenderAxis(previewState.axis);
+
+        const { positions, colors } = buildConeLineArrays(apex, axis, previewState.angleDeg, previewState.range);
+        if (positions.length) {
+            app.drawLineArrays(positions, colors, true, layer);
+        }
+    }
+
+    if (navDebugState.enabled) {
+        const { positions, colors } = buildNavAxisDiskLineArrays(navDebugState.axis);
+        if (positions.length) {
+            app.drawLineArrays(positions, colors, true, layer);
+        }
+    }
 }
 
 function installPreviewHook() {
@@ -162,6 +215,11 @@ function updatePreview(params = {}) {
     if (typeof params.enabled === 'boolean') {
         previewState.enabled = params.enabled;
     }
+    if (params.poseSpace === 'render' || params.poseSpace === 'data') {
+        previewState.poseSpace = params.poseSpace;
+    } else {
+        previewState.poseSpace = 'data';
+    }
 
     installPreviewHook();
     if (window.scene) window.scene.forceRender = true;
@@ -183,10 +241,48 @@ function pointInsideCone(px, py, pz, apex, axis, tanAngle, maxRange) {
     return (rx * rx + ry * ry + rz * rz) <= limit * limit;
 }
 
+function transformPointMat4(m, p) {
+    const x = p[0], y = p[1], z = p[2];
+    const w = (m[3] * x) + (m[7] * y) + (m[11] * z) + m[15];
+    const iw = w !== 0 ? (1 / w) : 1;
+    return [
+        ((m[0] * x) + (m[4] * y) + (m[8] * z) + m[12]) * iw,
+        ((m[1] * x) + (m[5] * y) + (m[9] * z) + m[13]) * iw,
+        ((m[2] * x) + (m[6] * y) + (m[10] * z) + m[14]) * iw
+    ];
+}
+
+function transformDirectionMat4(m, d) {
+    const x = d[0], y = d[1], z = d[2];
+    return [
+        (m[0] * x) + (m[4] * y) + (m[8] * z),
+        (m[1] * x) + (m[5] * y) + (m[9] * z),
+        (m[2] * x) + (m[6] * y) + (m[10] * z)
+    ];
+}
+
+function toSplatLocalCone(splat, apex, axis) {
+    const wt = splat?.entity?.getWorldTransform?.();
+    if (!wt || typeof wt.clone !== 'function') {
+        return { apexLocal: apex, axisLocal: axis };
+    }
+
+    try {
+        const inv = wt.clone().invert();
+        const m = inv?.data;
+        if (!m) return { apexLocal: apex, axisLocal: axis };
+        const apexLocal = transformPointMat4(m, apex);
+        const axisLocal = norm(transformDirectionMat4(m, axis));
+        return { apexLocal, axisLocal };
+    } catch (_e) {
+        return { apexLocal: apex, axisLocal: axis };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Aplicar seleção por cone no primeiro splat carregado no SuperSplat
 // ---------------------------------------------------------------------------
-function applyConeSeleciton(apex, axis, angleDeg, range, op) {
+function applyConeSeleciton(apex, axis, angleDeg, range, op, poseSpace = 'data') {
     const scene = window.scene;
     if (!scene) return { error: 'window.scene não encontrado. SuperSplat carregado?' };
 
@@ -208,13 +304,15 @@ function applyConeSeleciton(apex, axis, angleDeg, range, op) {
     const tanA = Math.tan(angleDeg * Math.PI / 180);
     const n = splatData.numSplats;
 
-    // Normalizar axis
+    // Cone vem em world/data-space do runtime; convertemos para o local do splat
+    // para manter o mesmo sistema de coordenadas dos arrays x/y/z.
     const len = Math.sqrt(axis[0] ** 2 + axis[1] ** 2 + axis[2] ** 2);
     const normAxis = len > 0 ? axis.map(v => v / len) : [0, 0, -1];
+    const { apexLocal, axisLocal } = toSplatLocalCone(splat, apex, normAxis);
 
     let count = 0;
     for (let i = 0; i < n; i++) {
-        const inside = pointInsideCone(x[i], y[i], z[i], apex, normAxis, tanA, range);
+        const inside = pointInsideCone(x[i], y[i], z[i], apexLocal, axisLocal, tanA, range);
         if (stateArr) {
             const deleted = (stateArr[i] & 2) !== 0;
             const locked  = (stateArr[i] & 4) !== 0;
@@ -232,7 +330,7 @@ function applyConeSeleciton(apex, axis, angleDeg, range, op) {
     }
 
     // Atualizar preview do cone para refletir os parâmetros atuais
-    updatePreview({ apex, axis: normAxis, angleDeg, range });
+    updatePreview({ apex, axis: normAxis, angleDeg, range, poseSpace });
 
     // Atualizar a textura de estado no SuperSplat
     try {
@@ -545,12 +643,22 @@ function injectPanel() {
 // Gamepad polling — atualiza cone aim/apex em tempo real via navigator.getGamepads()
 // ---------------------------------------------------------------------------
 const GP_DEADZONE    = 0.12;
+const GP_NAV_DEADZONE = 0.06;
 const GP_AIM_SPEED   = 0.018;  // rad/frame @ deflexão máxima
 const GP_MOVE_SPEED  = 0.04;   // m/frame @ deflexão máxima
 const GP_ANGLE_SPEED = 0.5;    // °/frame @ deflexão máxima
 
 let gpLoopRunning = false;
 let gpPrevButtons = [];
+let xrPrevButtons = {
+    trigger: false,
+    clear: false,
+    cycle: false
+};
+let xrGridVisibleBeforeSession = null;
+let xrVisualLocomotionBase = null;
+let xrVisualLocomotionOffset = [0, 0, 0];
+let gpLastTs = 0;
 const OP_CYCLE = ['add', 'set', 'remove'];
 
 function gpDeadZone(v) {
@@ -605,34 +713,546 @@ function gpJustPressed(btn, idx) {
     return cur && !prev;
 }
 
+function xrButtonPressed(src, gp, index) {
+    if (src && typeof src.getButton === 'function') {
+        const v = src.getButton(index);
+        if (typeof v === 'boolean') return v;
+        if (typeof v === 'number') return v > 0.5;
+    }
+    const btn = gp?.buttons?.[index];
+    if (!btn) return false;
+    if (typeof btn === 'number') return btn > 0.5;
+    if (typeof btn.pressed === 'boolean') return btn.pressed;
+    return Number(btn.value ?? 0) > 0.5;
+}
+
+function getXrSources() {
+    const app = window.scene?.app;
+    const input = app?.xr?.input;
+    const sources = input?.inputSources || [];
+    if (!sources.length) return { primary: null, left: null, right: null, all: [] };
+
+    const classifyHand = (s) => {
+        const hand = String(s?.handedness || '').toLowerCase();
+        if (hand === 'left' || hand === 'right') return hand;
+
+        const profileStr = Array.isArray(s?.profiles) ? s.profiles.join(' ').toLowerCase() : '';
+        if (profileStr.includes('left')) return 'left';
+        if (profileStr.includes('right')) return 'right';
+
+        const gpId = String(s?.gamepad?.id || '').toLowerCase();
+        if (gpId.includes('left')) return 'left';
+        if (gpId.includes('right')) return 'right';
+
+        return 'unknown';
+    };
+
+    const right = sources.find((s) => classifyHand(s) === 'right');
+    const left = sources.find((s) => classifyHand(s) === 'left');
+    return {
+        primary: right || left || sources[0] || null,
+        left: left || null,
+        right: right || null,
+        all: sources
+    };
+}
+
+function pickXrNavSource(xrSources, xrAimSource) {
+    const all = xrSources?.all || [];
+    const left = xrSources?.left || null;
+    if (left?.gamepad && left !== xrAimSource) return left;
+
+    // fallback: any non-aim source with gamepad (for runtimes with ambiguous handedness)
+    const alt = all.find((s) => s !== xrAimSource && s?.gamepad && (s?.gamepad?.axes?.length ?? 0) >= 2);
+    if (alt) return alt;
+
+    return left || xrAimSource || null;
+}
+
+function readPreferredStick(axes = []) {
+    const a0x = gpDeadZone(axes[0] ?? 0);
+    const a0y = gpDeadZone(axes[1] ?? 0);
+    const a1x = gpDeadZone(axes[2] ?? 0);
+    const a1y = gpDeadZone(axes[3] ?? 0);
+    const m0 = Math.hypot(a0x, a0y);
+    const m1 = Math.hypot(a1x, a1y);
+    if (m1 > m0) return [a1x, a1y];
+    return [a0x, a0y];
+}
+
+function applyDeadZoneAxis(v, dz = GP_NAV_DEADZONE) {
+    if (!Number.isFinite(v)) return 0;
+    if (Math.abs(v) < dz) return 0;
+    return (v - Math.sign(v) * dz) / (1 - dz);
+}
+
+function readNavAxesFromGamepad(gamepad) {
+    const axes = gamepad?.axes || [];
+    const r20 = [Number(axes[2] ?? 0), Number(axes[3] ?? 0)];
+    const r01 = [Number(axes[0] ?? 0), Number(axes[1] ?? 0)];
+
+    // Muitos runtimes XR usam 2/3 para thumbstick; alguns usam 0/1.
+    const raw = Math.hypot(r20[0], r20[1]) >= Math.hypot(r01[0], r01[1]) ? r20 : r01;
+    return [applyDeadZoneAxis(raw[0]), applyDeadZoneAxis(raw[1])];
+}
+
+function readXrNavAxes(xrNavSource, xrAimSource) {
+    // 1) Prefer explicit XR left source
+    let axes = readNavAxesFromGamepad(xrNavSource?.gamepad);
+    if (Math.hypot(axes[0], axes[1]) > 1e-4) return { axes, source: 'xr-left' };
+
+    // 2) Try any non-aim XR source gamepad
+    const sources = window.scene?.app?.xr?.input?.inputSources || [];
+    for (const s of sources) {
+        if (s === xrAimSource) continue;
+        const a = readNavAxesFromGamepad(s?.gamepad);
+        if (Math.hypot(a[0], a[1]) > 1e-4) return { axes: a, source: 'xr-alt' };
+    }
+
+    // 3) WebXR gamepad fallback (some runtimes expose stick only here)
+    const pads = getConnectedGamepads();
+    const leftCandidates = pads.filter((p) => {
+        const hand = String(p?.hand || '').toLowerCase();
+        const mapping = String(p?.mapping || '').toLowerCase();
+        const id = String(p?.id || '').toLowerCase();
+        return hand === 'left' || mapping === 'xr-standard' || id.includes('left');
+    });
+
+    for (const p of leftCandidates) {
+        const a = readNavAxesFromGamepad(p);
+        if (Math.hypot(a[0], a[1]) > 1e-4) return { axes: a, source: `gp-left#${p.index}` };
+    }
+
+    // 4) last fallback
+    axes = readNavAxesFromGamepad((xrNavSource || xrAimSource)?.gamepad);
+    return { axes, source: 'fallback' };
+}
+
+function getBestXrMoveAxes(xrSources) {
+    const all = xrSources?.all || [];
+
+    // Preferir mão esquerda para locomoção quando disponível.
+    const ordered = [];
+    if (xrSources?.left) ordered.push(xrSources.left);
+    for (const s of all) {
+        if (!ordered.includes(s)) ordered.push(s);
+    }
+
+    let best = [0, 0];
+    let bestMag = 0;
+    for (const s of ordered) {
+        const axes = s?.gamepad?.axes || [];
+        const v = readPreferredStick(axes);
+        const m = Math.hypot(v[0], v[1]);
+        if (m > bestMag) {
+            best = v;
+            bestMag = m;
+        }
+    }
+
+    return best;
+}
+
+function getConnectedGamepads() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const out = [];
+    for (const p of pads) {
+        if (p && p.connected) out.push(p);
+    }
+    return out;
+}
+
+function getGamepadHand(pad) {
+    const hand = String(pad?.hand || '').toLowerCase();
+    if (hand === 'left' || hand === 'right') return hand;
+
+    const id = String(pad?.id || '').toLowerCase();
+    if (id.includes('left')) return 'left';
+    if (id.includes('right')) return 'right';
+    return 'unknown';
+}
+
+function resolveDesktopGamepadRoles(connectedPads) {
+    const right = connectedPads.find((p) => getGamepadHand(p) === 'right') || null;
+    const left = connectedPads.find((p) => getGamepadHand(p) === 'left') || null;
+
+    const aim = right || connectedPads[0] || null;
+    const nav = left || aim;
+
+    const dual = Boolean(aim && nav && aim !== nav);
+    const aimLabel = aim ? `${getGamepadHand(aim)}#${aim.index}` : 'none';
+    const navLabel = nav ? `${getGamepadHand(nav)}#${nav.index}` : 'none';
+    const label = dual ? `dual aim:${aimLabel} nav:${navLabel}` : (aim ? `single ${aim.id.slice(0, 24)}` : 'desconectado');
+
+    return { aim, nav, dual, label };
+}
+
+function syncPreviewToXrController(xrSources) {
+    const source = xrSources?.right || xrSources?.primary || xrSources?.left || null;
+    if (!source) return false;
+
+    const pose = getXrPose(source);
+    if (!pose) return false;
+
+    previewState.apex = pose.origin;
+    previewState.axis = pose.direction;
+    previewState.poseSpace = 'render';
+    updatePanelFromPreview();
+    installPreviewHook();
+    if (window.scene) window.scene.forceRender = true;
+    return true;
+}
+
+function getHeadForward(cam, Vec3) {
+    const ent = cam?.mainCamera;
+    const f = ent?.forward;
+    if (f) {
+        return norm([f.x, f.y, f.z]);
+    }
+
+    const zAxis = new Vec3(0, 0, 1);
+    const wt = ent?.getWorldTransform?.();
+    if (wt) {
+        wt.getZ(zAxis);
+        return norm([-zAxis.x, -zAxis.y, -zAxis.z]);
+    }
+
+    return [0, 0, -1];
+}
+
+function beginXrVisualLocomotion() {
+    const scene = window.scene;
+    const root = scene?.contentRoot;
+    if (!root?.getPosition || !root?.setPosition) return false;
+    const p = root.getPosition();
+    xrVisualLocomotionBase = [p.x, p.y, p.z];
+    xrVisualLocomotionOffset = [0, 0, 0];
+    return true;
+}
+
+function resetXrVisualLocomotion() {
+    const scene = window.scene;
+    const root = scene?.contentRoot;
+    if (root?.setPosition && Array.isArray(xrVisualLocomotionBase)) {
+        root.setPosition(
+            xrVisualLocomotionBase[0],
+            xrVisualLocomotionBase[1],
+            xrVisualLocomotionBase[2]
+        );
+    }
+    xrVisualLocomotionBase = null;
+    xrVisualLocomotionOffset = [0, 0, 0];
+}
+
+function getXrPose(source) {
+    if (!source) return null;
+
+    if (typeof source.getOrigin === 'function' && typeof source.getDirection === 'function') {
+        const o = source.getOrigin();
+        const d = source.getDirection();
+        if (o && d) {
+            return {
+                origin: [o.x, o.y, o.z],
+                direction: norm([d.x, d.y, d.z])
+            };
+        }
+    }
+
+    if (typeof source.getPosition === 'function' && typeof source.getRotation === 'function') {
+        const p = source.getPosition();
+        const r = source.getRotation();
+        if (p && r && window.pc?.Quat) {
+            const q = new window.pc.Quat(r.x, r.y, r.z, r.w);
+            const dir = new window.pc.Vec3(0, 0, -1);
+            q.transformVector(dir, dir);
+            return {
+                origin: [p.x, p.y, p.z],
+                direction: norm([dir.x, dir.y, dir.z])
+            };
+        }
+    }
+
+    return null;
+}
+
+function moveObserverByLeftStick(stickX, stickY, dt = 1 / 60) {
+    const scene = window.scene;
+    const cam = scene?.camera;
+    const Vec3 = window.pc?.Vec3;
+    const root = scene?.contentRoot;
+    if (!cam || !Vec3 || !root?.setPosition) return null;
+
+    if (!Array.isArray(xrVisualLocomotionBase)) {
+        beginXrVisualLocomotion();
+    }
+    if (!Array.isArray(xrVisualLocomotionBase)) return null;
+
+    if (stickX === 0 && stickY === 0) return null;
+
+    // Locomoção visual acumulada no contentRoot, no plano XZ.
+    const headForward = getHeadForward(cam, Vec3);
+    const forward = norm([headForward[0], 0, headForward[2]]);
+    const right = norm([-forward[2], 0, forward[0]]);
+    const moveSpeed = 2.0 * Math.max(1 / 120, Math.min(1 / 20, dt));
+
+    const dx = stickX * right[0] * moveSpeed + (-stickY) * forward[0] * moveSpeed;
+    const dz = stickX * right[2] * moveSpeed + (-stickY) * forward[2] * moveSpeed;
+
+    // Move a cena no sentido oposto para simular deslocamento da câmera.
+    xrVisualLocomotionOffset[0] -= dx;
+    xrVisualLocomotionOffset[2] -= dz;
+
+    root.setPosition(
+        xrVisualLocomotionBase[0] + xrVisualLocomotionOffset[0],
+        xrVisualLocomotionBase[1],
+        xrVisualLocomotionBase[2] + xrVisualLocomotionOffset[2]
+    );
+
+    const delta = new Vec3(
+        stickX * right[0] * moveSpeed + (-stickY) * forward[0] * moveSpeed,
+        0,
+        stickX * right[2] * moveSpeed + (-stickY) * forward[2] * moveSpeed
+    );
+    return [delta.x, delta.y, delta.z];
+}
+
+function positionObserverForSelection() {
+    const scene = window.scene;
+    const cam = scene?.camera;
+    const Vec3 = window.pc?.Vec3;
+    if (!scene || !cam || !Vec3 || typeof cam.setPose !== 'function') return;
+
+    const bound = scene.bound;
+    const center = bound?.center;
+    const halfExtents = bound?.halfExtents;
+    if (!center || !halfExtents) return;
+
+    const radius = Math.max(0.5, Math.hypot(halfExtents.x, halfExtents.y, halfExtents.z));
+    const distance = Math.max(2.0, radius * 2.0);
+
+    // XR sobrescreve a pose local da câmera a cada frame com a pose do HMD.
+    // Para garantir que a cena fique à frente na entrada, reposicionamos o
+    // cameraRoot usando o forward atual da cabeça.
+    const xrActive = Boolean(scene?.app?.xr?.active);
+    const root = scene?.cameraRoot;
+    if (xrActive && root?.getPosition && root?.setPosition) {
+        const headPos = cam.mainCamera?.getPosition?.();
+        if (headPos) {
+            const fwd = getHeadForward(cam, Vec3);
+
+            const desiredHead = [
+                center.x - fwd[0] * distance,
+                center.y - fwd[1] * distance,
+                center.z - fwd[2] * distance
+            ];
+
+            const delta = [
+                desiredHead[0] - headPos.x,
+                desiredHead[1] - headPos.y,
+                desiredHead[2] - headPos.z
+            ];
+
+            const rp = root.getPosition();
+            root.setPosition(rp.x + delta[0], rp.y + delta[1], rp.z + delta[2]);
+
+            // Mantém orbit consistente para quando sair do XR.
+            cam.setFocalPoint(new Vec3(center.x, center.y, center.z), 0);
+            return;
+        }
+    }
+
+    // Keep current viewing side, but force look-at to the splat center.
+    const currentPos = cam.mainCamera?.getPosition?.();
+    let dir = [0, 0, 1];
+    if (currentPos) {
+        dir = norm([
+            currentPos.x - center.x,
+            currentPos.y - center.y,
+            currentPos.z - center.z
+        ]);
+    }
+
+    const pos = new Vec3(
+        center.x + dir[0] * distance,
+        center.y + dir[1] * distance,
+        center.z + dir[2] * distance
+    );
+    const target = new Vec3(center.x, center.y, center.z);
+
+    cam.setPose(pos, target, 0);
+}
+
+function setGridVisible(visible) {
+    const scene = window.scene;
+    if (!scene) return;
+
+    if (scene.events?.fire) {
+        scene.events.fire('grid.setVisible', visible);
+        return;
+    }
+
+    if (scene.grid) {
+        scene.grid.visible = visible;
+    }
+}
+
+function cycleOperationMode() {
+    const opEl = document.getElementById('cs-op');
+    if (!opEl) return;
+    const cur = OP_CYCLE.indexOf(opEl.value);
+    opEl.value = OP_CYCLE[(cur + 1) % OP_CYCLE.length];
+}
+
+function applySelectionFromPreview() {
+    const op = document.getElementById('cs-op')?.value ?? 'add';
+    const apex = previewState.poseSpace === 'render'
+        ? previewState.apex
+        : toPreviewRenderPoint(previewState.apex);
+    const axis = previewState.poseSpace === 'render'
+        ? norm(previewState.axis)
+        : toPreviewRenderAxis(previewState.axis);
+    const result = applyConeSeleciton(
+        apex,
+        axis,
+        previewState.angleDeg,
+        previewState.range,
+        op,
+        previewState.poseSpace
+    );
+    const statusEl = document.getElementById('cs-status');
+    if (statusEl) {
+        statusEl.textContent = result.error
+            ? `Erro: ${result.error}`
+            : `✓ ${result.inside} / ${result.total} gaussianas (${op})`;
+    }
+}
+
 function startGamepadLoop() {
     if (gpLoopRunning) return;
     gpLoopRunning = true;
 
     function loop() {
-        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-        let gp = null;
-        for (const g of gamepads) {
-            if (g && g.connected) { gp = g; break; }
-        }
+        const app = window.scene?.app;
+        const nowTs = performance.now();
+        const dt = gpLastTs > 0 ? (nowTs - gpLastTs) / 1000 : (1 / 60);
+        gpLastTs = nowTs;
+
+        const xrActive = Boolean(app?.xr?.active);
+        const xrSources = xrActive ? getXrSources() : null;
+        const xrAimSource = xrSources?.right || xrSources?.primary || null;
+        const xrNavSource = pickXrNavSource(xrSources, xrAimSource);
+        const xrSource = xrAimSource;
+
+        const connectedPads = getConnectedGamepads();
+        const desktopPads = resolveDesktopGamepadRoles(connectedPads);
+        const gp = desktopPads.aim;
 
         const indicator = document.getElementById('gp-indicator');
         if (indicator) {
-            indicator.style.color    = gp ? '#4ade80' : '#6b7280';
-            indicator.textContent    = gp ? `🎮 ${gp.id.slice(0, 24)}` : '🎮 desconectado';
+            if (xrSource) {
+                indicator.style.color = '#22d3ee';
+                const hasLeft = Boolean(xrSources?.left);
+                const hasRight = Boolean(xrSources?.right);
+                const navLabel = xrNavSource ? String(xrNavSource.handedness || 'source') : 'none';
+                const aimLabel = xrAimSource ? String(xrAimSource.handedness || 'source') : 'none';
+                const pair = hasLeft && hasRight ? 'L+R' : (hasRight ? 'R' : (hasLeft ? 'L' : '1x'));
+                indicator.textContent = `XR ${pair} aim:${aimLabel} nav:${navLabel}`;
+            } else {
+                indicator.style.color = gp ? '#4ade80' : '#6b7280';
+                indicator.textContent = gp ? `🎮 ${desktopPads.label}` : '🎮 desconectado';
+            }
         }
 
+        // XR controller path (preferred while XR session is active)
+        if (xrSource) {
+            const pose = getXrPose(xrSource);
+            const gpXr = xrSource.gamepad || null;
+            let dirty = false;
+
+            if (pose) {
+                previewState.apex = pose.origin;
+                previewState.axis = pose.direction;
+                previewState.poseSpace = 'render';
+                dirty = true;
+            }
+
+            // Controle direito: mira/ações. Controle esquerdo: navegação.
+            const navResolved = readXrNavAxes(xrNavSource, xrAimSource);
+            const navAxes = navResolved.axes;
+            const [lstX, lstY] = navAxes;
+            navDebugState.enabled = true;
+            navDebugState.axis = [lstX, lstY];
+            navDebugState.source = navResolved.source;
+
+            if (indicator && xrSource) {
+                indicator.textContent += ` navAxis:${lstX.toFixed(2)},${lstY.toFixed(2)} src:${navResolved.source}`;
+            }
+
+            const aimAxes = gpXr?.axes || [];
+            const rangeAxis = gpDeadZone(aimAxes.length >= 4 ? (aimAxes[3] ?? 0) : 0);
+            const angleAxis = gpDeadZone(aimAxes.length >= 4 ? (aimAxes[2] ?? 0) : 0);
+            const observerDelta = moveObserverByLeftStick(lstX, lstY, dt);
+            if (observerDelta) {
+                dirty = true;
+            }
+            if (rangeAxis !== 0) {
+                previewState.range = Math.min(20, Math.max(0.1, previewState.range + (-rangeAxis * 0.08)));
+                dirty = true;
+            }
+            if (angleAxis !== 0) {
+                previewState.angleDeg = Math.min(90, Math.max(1, previewState.angleDeg + (angleAxis * 0.6)));
+                dirty = true;
+            }
+
+            const trigger = xrButtonPressed(xrSource, gpXr, 0) || Boolean(xrSource.selecting);
+            const clear = xrButtonPressed(xrSource, gpXr, 1) || xrButtonPressed(xrSource, gpXr, 4);
+            const cycle = xrButtonPressed(xrSource, gpXr, 2) || xrButtonPressed(xrSource, gpXr, 5);
+
+            if (trigger && !xrPrevButtons.trigger) {
+                applySelectionFromPreview();
+            }
+            if (clear && !xrPrevButtons.clear) {
+                document.getElementById('cs-clear')?.click();
+            }
+            if (cycle && !xrPrevButtons.cycle) {
+                cycleOperationMode();
+            }
+
+            xrPrevButtons.trigger = trigger;
+            xrPrevButtons.clear = clear;
+            xrPrevButtons.cycle = cycle;
+
+            if (dirty) {
+                updatePanelFromPreview();
+                installPreviewHook();
+                if (window.scene) window.scene.forceRender = true;
+            }
+
+            // Do not mix desktop mapping while XR is active.
+            gpPrevButtons = [];
+            requestAnimationFrame(loop);
+            return;
+        }
+
+        xrPrevButtons.trigger = false;
+        xrPrevButtons.clear = false;
+        xrPrevButtons.cycle = false;
+        navDebugState.enabled = false;
+
         if (gp) {
-            const axes    = gp.axes;
-            const buttons = gp.buttons;
+            const aimPad = desktopPads.aim;
+            const navPad = desktopPads.nav;
+            const aimAxes = aimPad?.axes || [];
+            const navAxes = readNavAxesFromGamepad(navPad);
+            const buttons = aimPad?.buttons || [];
 
             // Right stick (axes 2/3) → aim direction (yaw / pitch)
-            const rstX = gpDeadZone(axes[2] ?? 0);
-            const rstY = gpDeadZone(axes[3] ?? 0);
+            const rstX = gpDeadZone(aimAxes[2] ?? 0);
+            const rstY = gpDeadZone(aimAxes[3] ?? 0);
 
-            // Left stick (axes 0/1) → apex movement (strafe / forward)
-            const lstX = gpDeadZone(axes[0] ?? 0);
-            const lstY = gpDeadZone(axes[1] ?? 0);
+            // Navegação usa o segundo controle (left) quando disponível.
+            const lstX = navAxes[0] ?? 0;
+            const lstY = navAxes[1] ?? 0;
 
             let dirty = false;
 
@@ -684,17 +1304,7 @@ function startGamepadLoop() {
 
             // A/Cross (button 0) → apply selection (rising edge only)
             if (gpJustPressed(buttons[0], 0)) {
-                const op = document.getElementById('cs-op')?.value ?? 'add';
-                const result = applyConeSeleciton(
-                    previewState.apex, previewState.axis,
-                    previewState.angleDeg, previewState.range, op
-                );
-                const statusEl = document.getElementById('cs-status');
-                if (statusEl) {
-                    statusEl.textContent = result.error
-                        ? `Erro: ${result.error}`
-                        : `✓ ${result.inside} / ${result.total} gaussianas (${op})`;
-                }
+                applySelectionFromPreview();
             }
 
             // B/Circle (button 1) → clear selection (rising edge)
@@ -704,11 +1314,7 @@ function startGamepadLoop() {
 
             // Y/Triangle (button 3) → cycle operation mode (rising edge)
             if (gpJustPressed(buttons[3], 3)) {
-                const opEl = document.getElementById('cs-op');
-                if (opEl) {
-                    const cur = OP_CYCLE.indexOf(opEl.value);
-                    opEl.value = OP_CYCLE[(cur + 1) % OP_CYCLE.length];
-                }
+                cycleOperationMode();
             }
 
             gpPrevButtons = Array.from(buttons).map(b => b?.pressed ?? false);
@@ -815,6 +1421,20 @@ function startXrSession({ type = 'immersive-vr', space = 'local-floor' } = {}) {
                 if (err) {
                     reject(err);
                 } else {
+                    if (xrGridVisibleBeforeSession === null) {
+                        xrGridVisibleBeforeSession = Boolean(window.scene?.grid?.visible);
+                    }
+                    setGridVisible(false);
+                    beginXrVisualLocomotion();
+                    const xrSources = getXrSources();
+                    syncPreviewToXrController(xrSources);
+                    positionObserverForSelection();
+                    // Reaplica no primeiro frame XR válido para usar pose real do HMD.
+                    xr.once?.('update', () => {
+                        const freshSources = getXrSources();
+                        syncPreviewToXrController(freshSources);
+                        positionObserverForSelection();
+                    });
                     if (window.scene) window.scene.forceRender = true;
                     resolve(getXrStatus());
                 }
@@ -830,6 +1450,11 @@ function endXrSession() {
     if (xr.active && typeof xr.end === 'function') {
         xr.end();
     }
+    if (xrGridVisibleBeforeSession !== null) {
+        setGridVisible(xrGridVisibleBeforeSession);
+        xrGridVisibleBeforeSession = null;
+    }
+    resetXrVisualLocomotion();
     if (window.scene) window.scene.forceRender = true;
     return getXrStatus();
 }

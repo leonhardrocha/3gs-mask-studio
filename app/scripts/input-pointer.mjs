@@ -165,13 +165,28 @@ class PointerInputAdapter {
         if (sourceType === 'xr-left' || sourceType === 'xr-right') {
             const src = this._getXrSource();
             if (src) {
-                const origin = src.getPosition();
-                const rot = src.getRotation();
-                const direction = new pc.Vec3(0, 0, -1);
-                const q = new pc.Quat(rot.x, rot.y, rot.z, rot.w);
-                q.transformVector(direction, direction);
-                direction.normalize();
-                return { origin, direction, sourceType };
+                // Prefer explicit ray APIs when available (more robust across XR profiles).
+                if (typeof src.getOrigin === 'function' && typeof src.getDirection === 'function') {
+                    const origin = src.getOrigin();
+                    const direction = src.getDirection();
+                    if (origin && direction) {
+                        direction.normalize();
+                        return { origin, direction, sourceType };
+                    }
+                }
+
+                // Fallback to pose APIs.
+                if (typeof src.getPosition === 'function' && typeof src.getRotation === 'function') {
+                    const origin = src.getPosition();
+                    const rot = src.getRotation();
+                    if (origin && rot) {
+                        const direction = new pc.Vec3(0, 0, -1);
+                        const q = new pc.Quat(rot.x, rot.y, rot.z, rot.w);
+                        q.transformVector(direction, direction);
+                        direction.normalize();
+                        return { origin, direction, sourceType };
+                    }
+                }
             }
         }
 
@@ -265,15 +280,34 @@ class PointerInputAdapter {
     }
 
     _getXrSource() {
-        if (this._xrSource) return this._xrSource;
         const input = this.app?.xr?.input;
-        if (!input) return null;
+        if (!input) {
+            this._xrSource = null;
+            return null;
+        }
+
         const sources = input.inputSources || [];
+
+        // Drop stale cached source if it is no longer present.
+        if (this._xrSource && !sources.includes(this._xrSource)) {
+            this._xrSource = null;
+        }
+
+        if (this._xrSource) return this._xrSource;
         if (!sources.length) return null;
 
-        const right = sources.find((s) => String(s.handedness || '').toLowerCase() === 'right');
-        const left = sources.find((s) => String(s.handedness || '').toLowerCase() === 'left');
-        return right || left || sources[0] || null;
+        const hasPose = (s) => {
+            if (!s) return false;
+            if (typeof s.getOrigin === 'function' && typeof s.getDirection === 'function') return true;
+            if (typeof s.getPosition === 'function' && typeof s.getRotation === 'function') return true;
+            return false;
+        };
+
+        const right = sources.find((s) => String(s.handedness || '').toLowerCase() === 'right' && hasPose(s));
+        const left = sources.find((s) => String(s.handedness || '').toLowerCase() === 'left' && hasPose(s));
+        const anyPose = sources.find((s) => hasPose(s));
+        this._xrSource = right || left || anyPose || sources[0] || null;
+        return this._xrSource;
     }
 
     _getDesktopGamepad() {
@@ -317,7 +351,19 @@ class PointerInputAdapter {
             // remove: B/Y or secondary squeeze/menu: 2 or 5
             const addPressed = this._xrButtonPressed(src, gp, 1) || this._xrButtonPressed(src, gp, 4);
             const removePressed = this._xrButtonPressed(src, gp, 2) || this._xrButtonPressed(src, gp, 5);
-            const triggerPressed = this._xrButtonPressed(src, gp, 0) || Boolean(src?.selecting);
+            const triggerPressed =
+                this._xrButtonPressed(src, gp, 0) ||
+                Boolean(src?.selecting) ||
+                Boolean(src?.selectPressed);
+
+            const anyButtonPressed = Array.isArray(gp?.buttons)
+                ? gp.buttons.some((btn) => {
+                    if (!btn) return false;
+                    if (typeof btn === 'number') return btn > 0.5;
+                    if (typeof btn.pressed === 'boolean') return btn.pressed;
+                    return Number(btn.value ?? 0) > 0.5;
+                })
+                : false;
 
             let rangeAxis = 0;
             if (gp?.axes?.length) {
@@ -335,7 +381,7 @@ class PointerInputAdapter {
                 rangeAxis,
                 addPressed,
                 removePressed,
-                selectPressed: triggerPressed || addPressed || removePressed
+                selectPressed: triggerPressed || addPressed || removePressed || anyButtonPressed
             };
         }
 
