@@ -653,7 +653,9 @@ let gpPrevButtons = [];
 let xrPrevButtons = {
     trigger: false,
     clear: false,
-    cycle: false
+    cycle: false,
+    teleport: false,
+    reset: false
 };
 let xrGridVisibleBeforeSession = null;
 let xrVisualLocomotionBase = null;
@@ -920,28 +922,124 @@ function getHeadForward(cam, Vec3) {
     return [0, 0, -1];
 }
 
-function beginXrVisualLocomotion() {
+function getXrCameraEntity() {
+    const app = window.scene?.app;
+    const xrCam = app?.xr?.camera;
+    return xrCam?.entity || xrCam || window.scene?.camera?.mainCamera || null;
+}
+
+function getXrRigEntity() {
     const scene = window.scene;
-    const root = scene?.contentRoot;
-    if (!root?.getPosition || !root?.setPosition) return false;
-    const p = root.getPosition();
+    const xrCamEntity = getXrCameraEntity();
+    return xrCamEntity?.parent || scene?.cameraRoot || null;
+}
+
+function getXrMoveBasis() {
+    const camEntity = getXrCameraEntity();
+    if (!camEntity) {
+        return {
+            forward: [0, 0, -1],
+            right: [1, 0, 0]
+        };
+    }
+
+    const f = camEntity.forward;
+    const r = camEntity.right;
+    const forward = norm([f?.x ?? 0, 0, f?.z ?? -1]);
+    const right = norm([r?.x ?? 1, 0, r?.z ?? 0]);
+    return { forward, right };
+}
+
+function beginXrVisualLocomotion() {
+    const rig = getXrRigEntity();
+    if (!rig) return false;
+
+    const p = rig.getLocalPosition ? rig.getLocalPosition() : rig.getPosition?.();
+    if (!p) return false;
+
     xrVisualLocomotionBase = [p.x, p.y, p.z];
     xrVisualLocomotionOffset = [0, 0, 0];
     return true;
 }
 
 function resetXrVisualLocomotion() {
-    const scene = window.scene;
-    const root = scene?.contentRoot;
-    if (root?.setPosition && Array.isArray(xrVisualLocomotionBase)) {
-        root.setPosition(
+    const rig = getXrRigEntity();
+    if (rig && Array.isArray(xrVisualLocomotionBase)) {
+        if (rig.setLocalPosition) {
+            rig.setLocalPosition(
+                xrVisualLocomotionBase[0],
+                xrVisualLocomotionBase[1],
+                xrVisualLocomotionBase[2]
+            );
+        } else if (rig.setPosition) {
+            rig.setPosition(
+                xrVisualLocomotionBase[0],
+                xrVisualLocomotionBase[1],
+                xrVisualLocomotionBase[2]
+            );
+        }
+    }
+    xrVisualLocomotionBase = null;
+    xrVisualLocomotionOffset = [0, 0, 0];
+}
+
+function teleportObserverToNavAxis(navX, navY) {
+    const rig = getXrRigEntity();
+    if (!rig) return false;
+
+    if (!Array.isArray(xrVisualLocomotionBase)) {
+        beginXrVisualLocomotion();
+    }
+    if (!Array.isArray(xrVisualLocomotionBase)) return false;
+
+    const { forward, right } = getXrMoveBasis();
+    const teleportScale = 1.0;
+    const dx = (navX * right[0] + (-navY) * forward[0]) * teleportScale;
+    const dz = (navX * right[2] + (-navY) * forward[2]) * teleportScale;
+
+    // Teleport em relação à orientação atual do observador.
+    xrVisualLocomotionOffset[0] += dx;
+    xrVisualLocomotionOffset[2] += dz;
+
+    if (rig.setLocalPosition) {
+        rig.setLocalPosition(
+            xrVisualLocomotionBase[0] + xrVisualLocomotionOffset[0],
+            xrVisualLocomotionBase[1],
+            xrVisualLocomotionBase[2] + xrVisualLocomotionOffset[2]
+        );
+    } else if (rig.setPosition) {
+        rig.setPosition(
+            xrVisualLocomotionBase[0] + xrVisualLocomotionOffset[0],
+            xrVisualLocomotionBase[1],
+            xrVisualLocomotionBase[2] + xrVisualLocomotionOffset[2]
+        );
+    }
+
+    if (window.scene) window.scene.forceRender = true;
+    return true;
+}
+
+function resetObserverToXrStart() {
+    const rig = getXrRigEntity();
+    if (!rig || !Array.isArray(xrVisualLocomotionBase)) return false;
+
+    xrVisualLocomotionOffset = [0, 0, 0];
+    if (rig.setLocalPosition) {
+        rig.setLocalPosition(
+            xrVisualLocomotionBase[0],
+            xrVisualLocomotionBase[1],
+            xrVisualLocomotionBase[2]
+        );
+    } else if (rig.setPosition) {
+        rig.setPosition(
             xrVisualLocomotionBase[0],
             xrVisualLocomotionBase[1],
             xrVisualLocomotionBase[2]
         );
     }
-    xrVisualLocomotionBase = null;
-    xrVisualLocomotionOffset = [0, 0, 0];
+
+    if (window.scene) window.scene.forceRender = true;
+    return true;
 }
 
 function getXrPose(source) {
@@ -977,10 +1075,8 @@ function getXrPose(source) {
 
 function moveObserverByLeftStick(stickX, stickY, dt = 1 / 60) {
     const scene = window.scene;
-    const cam = scene?.camera;
-    const Vec3 = window.pc?.Vec3;
-    const root = scene?.contentRoot;
-    if (!cam || !Vec3 || !root?.setPosition) return null;
+    const rig = getXrRigEntity();
+    if (!rig) return null;
 
     if (!Array.isArray(xrVisualLocomotionBase)) {
         beginXrVisualLocomotion();
@@ -989,24 +1085,30 @@ function moveObserverByLeftStick(stickX, stickY, dt = 1 / 60) {
 
     if (stickX === 0 && stickY === 0) return null;
 
-    // Locomoção visual acumulada no contentRoot, no plano XZ.
-    const headForward = getHeadForward(cam, Vec3);
-    const forward = norm([headForward[0], 0, headForward[2]]);
-    const right = norm([-forward[2], 0, forward[0]]);
+    // Locomoção relativa ao forward/right atual da câmera XR.
+    const { forward, right } = getXrMoveBasis();
     const moveSpeed = 2.0 * Math.max(1 / 120, Math.min(1 / 20, dt));
 
     const dx = stickX * right[0] * moveSpeed + (-stickY) * forward[0] * moveSpeed;
     const dz = stickX * right[2] * moveSpeed + (-stickY) * forward[2] * moveSpeed;
 
-    // Move a cena no sentido oposto para simular deslocamento da câmera.
-    xrVisualLocomotionOffset[0] -= dx;
-    xrVisualLocomotionOffset[2] -= dz;
+    // Move o rig no mesmo sentido do input para deslocar o observador.
+    xrVisualLocomotionOffset[0] += dx;
+    xrVisualLocomotionOffset[2] += dz;
 
-    root.setPosition(
-        xrVisualLocomotionBase[0] + xrVisualLocomotionOffset[0],
-        xrVisualLocomotionBase[1],
-        xrVisualLocomotionBase[2] + xrVisualLocomotionOffset[2]
-    );
+    if (rig.setLocalPosition) {
+        rig.setLocalPosition(
+            xrVisualLocomotionBase[0] + xrVisualLocomotionOffset[0],
+            xrVisualLocomotionBase[1],
+            xrVisualLocomotionBase[2] + xrVisualLocomotionOffset[2]
+        );
+    } else if (rig.setPosition) {
+        rig.setPosition(
+            xrVisualLocomotionBase[0] + xrVisualLocomotionOffset[0],
+            xrVisualLocomotionBase[1],
+            xrVisualLocomotionBase[2] + xrVisualLocomotionOffset[2]
+        );
+    }
 
     const delta = new Vec3(
         stickX * right[0] * moveSpeed + (-stickY) * forward[0] * moveSpeed,
@@ -1207,6 +1309,9 @@ function startGamepadLoop() {
             const trigger = xrButtonPressed(xrSource, gpXr, 0) || Boolean(xrSource.selecting);
             const clear = xrButtonPressed(xrSource, gpXr, 1) || xrButtonPressed(xrSource, gpXr, 4);
             const cycle = xrButtonPressed(xrSource, gpXr, 2) || xrButtonPressed(xrSource, gpXr, 5);
+            const gpNav = xrNavSource?.gamepad || null;
+            const teleport = xrButtonPressed(xrNavSource, gpNav, 0) || Boolean(xrNavSource?.selecting);
+            const reset = xrButtonPressed(xrNavSource, gpNav, 1) || xrButtonPressed(xrNavSource, gpNav, 4);
 
             if (trigger && !xrPrevButtons.trigger) {
                 applySelectionFromPreview();
@@ -1217,10 +1322,24 @@ function startGamepadLoop() {
             if (cycle && !xrPrevButtons.cycle) {
                 cycleOperationMode();
             }
+            if (teleport && !xrPrevButtons.teleport) {
+                const mag = Math.hypot(lstX, lstY);
+                if (mag > 0.05) {
+                    teleportObserverToNavAxis(lstX, lstY);
+                    dirty = true;
+                }
+            }
+            if (reset && !xrPrevButtons.reset) {
+                if (resetObserverToXrStart()) {
+                    dirty = true;
+                }
+            }
 
             xrPrevButtons.trigger = trigger;
             xrPrevButtons.clear = clear;
             xrPrevButtons.cycle = cycle;
+            xrPrevButtons.teleport = teleport;
+            xrPrevButtons.reset = reset;
 
             if (dirty) {
                 updatePanelFromPreview();
@@ -1237,6 +1356,8 @@ function startGamepadLoop() {
         xrPrevButtons.trigger = false;
         xrPrevButtons.clear = false;
         xrPrevButtons.cycle = false;
+        xrPrevButtons.teleport = false;
+        xrPrevButtons.reset = false;
         navDebugState.enabled = false;
 
         if (gp) {
