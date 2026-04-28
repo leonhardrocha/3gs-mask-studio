@@ -655,18 +655,29 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 - [ ] Corrigir renderização do grid no XR com estereoscopia correta entre os olhos.
   - Problema atual: grid aparece com estéreo incorreto/desalinhado no headset, apesar de seguir a câmera.
   - Status: patch aplicado no código para usar câmera efetiva por olho no hook de render (`supersplat/src/scene.ts`, `supersplat/src/infinite-grid.ts`) e fallback de usabilidade com grid desativado automaticamente durante sessão XR (`tools/cone-selector/inject.mjs`); pendente validação manual em headset.
-- [ ] Corrigir responsividade dos controles XR.
-  - Problema atual: botões e navegação não respondem em runtime XR (falha funcional de input).
-  - Status: patch aplicado no runtime de input (`tools/cone-selector/inject.mjs` e `app/scripts/input-pointer.mjs`), incluindo inversão de eixo Y no XR e deslocamento do observador por alavanca esquerda; pendente validação manual em headset.
+- [x] Restabelecer funcionamento base dos controles XR em runtime (botões/eixos/navegação).
+  - Status validado em headset: XR voltou a funcionar após ajuste de locomoção movendo o rig (pai da câmera) no `tools/cone-selector/inject.mjs`.
+- [ ] Ajustar responsividade final dos controles XR (latência/intermitência/paridade entre perfis).
+  - Status atual: funcionamento base recuperado; pendente ajuste fino por perfil de headset/controlador.
 - [x] Ajustar mapeamento de botões/eixos XR para ficar mais próximo do comportamento de gamepad.
 - [x] Habilitar `xrCompatible` + `XrManager` também no app standalone (`app/`) para botão VR.
 - [x] Mitigar cache stale via Service Worker no fluxo local (`nosw=1` e unregister em localhost).
+
+#### Validação técnica — rotação visual do splat apenas em memória
+
+- [x] Viabilidade confirmada na documentação/código do SuperSplat: a rotação visual pode ser aplicada na entidade do splat sem editar os arrays originais `x/y/z`.
+  - Evidência: `Splat.move(position, rotation, scale)` atua em `entity.setLocalRotation(...)` e atualiza bounds/world transform (`supersplat/src/splat.ts`).
+  - Evidência: export usa matriz de transformação em cache durante serialização (`supersplat/src/splat-serialize.ts`), permitindo controle explícito de quando aplicar/reverter transformação.
+- [ ] Implementar modo "rotação de visualização" no wrapper/inject (somente runtime em memória) com chaveamento por botão do controle esquerdo. No modo de "rotação de visualização" é aplicada uma rotação nos planos X e Z de acordo com a entrada da alavanca esquerda, caso contrário a alavanca esquerda é utiliza para a funcionalidade de navegação. Mostrar na UI o modo corrente!
+- [ ] Salvar snapshot de transformação local do splat antes da rotação de preview.
+- [ ] Reverter transformação para snapshot original imediatamente antes de exportar (`scene.write` / bridge) para preservar coordenadas originais. use um dos botões do controle esquerdo disponíveis (não os triggers) para fazer a exportação.
+- [ ] Reaplicar rotação de preview após export (opcional), mantendo UX sem persistir rotação em arquivo.
 
 #### Critérios de aceite da Fase 16
 
 - [x] Entrar em XR não apaga a cena imediatamente após o primeiro frame.
 - [ ] Grid do SuperSplat renderiza corretamente em XR com estéreo consistente entre os olhos.
-- [ ] Controles XR voltam a funcionar em runtime (botões/eixos/navegação) nos perfis suportados.
+- [x] Controles XR voltam a funcionar em runtime (botões/eixos/navegação) nos perfis testados manualmente.
 - [ ] Controles XR reproduzem integralmente as ações esperadas de gamepad em todos os perfis de headset/controlador.
 - [ ] Controles XR respondem com baixa latência e sem intermitência perceptível (trigger/botões/eixos).
 - [ ] Botão VR do app standalone entra em sessão XR em ambiente WebXR válido sem ações extras.
@@ -687,14 +698,15 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 
 - Grid do SuperSplat no XR ainda apresenta estereoscopia incorreta (desalinhamento entre os olhos).
 - Comportamento de controles XR ainda pode variar por perfil de headset/controlador.
-- Controles XR ainda apresentam falha funcional de input em runtime (botões/eixos/navegação sem resposta).
+- Responsividade/paridade dos controles XR ainda requer ajuste fino por perfil de headset/controlador.
 - Botão VR no app standalone pode depender de condições de runtime (OpenXR/SteamVR/browser/gesto do usuário) mesmo com código ajustado.
+- Rotações de preview em memória devem ser revertidas antes do export para garantir arquivo final com coordenadas originais.
 
 ### Próximos passos recomendados
 
 1. Diagnosticar e corrigir o grid em XR com foco em estereoscopia (matrizes por olho, origem de câmera ativa e ordem de passes).
-2. Diagnosticar e corrigir a falha funcional dos controles XR (polling, priorização de input source, mapeamento mínimo de botões/eixos e navegação).
-3. Após restabelecer funcionamento base, ajustar responsividade (debounce, deadzone e latência de update) e fechar paridade com gamepad.
+2. Ajustar responsividade final dos controles XR (debounce, deadzone e latência) e fechar paridade com gamepad.
+3. Implementar rotação de visualização em memória (entity transform), com snapshot/reversão obrigatória antes do export.
 4. Rodar matriz de testes por headset/controlador (Quest Link, Index, WMR) com log de mapeamento de botões/eixos para validar funcionamento + responsividade.
 5. Validar entrada em VR no app standalone em ambiente WebXR real (permissão, gesto de usuário, runtime OpenXR/SteamVR) e registrar critérios de aceite.
 6. Adicionar telemetria de suporte para fechar a Fase 16 (`sourceType`, `buttons`, `axes`, `xr.active`, `xr.type`, `xr.spaceType`, tempo entre evento e ação).
@@ -703,16 +715,16 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 
 ### Fase 17 — Backlog Futuro (pendências movidas até a Fase 15)
 
-- [ ] (Origem: Fase 12) Validar predicado de cone idêntico entre gamepad desktop e XR (sem divergência geométrica).
-- [ ] (Origem: Fase 12) Validar troca entre gamepad desktop e XR sem recarregar a página.
-- [ ] (Origem: Fase 13) Implementar zona morta e debounce para evitar spam de seleção por trigger/alavanca instáveis.
-- [ ] (Origem: Fase 13) Exibir mensagem clara quando sessão XR não possuir input source ou layout de gamepad utilizável.
+- [x] (Origem: Fase 12) Validar predicado de cone idêntico entre gamepad desktop e XR (sem divergência geométrica).
+- [x] (Origem: Fase 12) Validar troca entre gamepad desktop e XR sem recarregar a página.
+- [x] (Origem: Fase 13) Implementar zona morta e debounce para evitar spam de seleção por trigger/alavanca instáveis.
+- [x] (Origem: Fase 13) Exibir mensagem clara quando sessão XR não possuir input source ou layout de gamepad utilizável.
 - [ ] (Origem: Fase 13) Expor comando `serializeFull` na UI do wrapper com `selectedOpacityRaw`, `unselectedOpacityRaw`, `opacityThresholdRaw`.
-- [ ] (Origem: Fase 13) Executar testes manuais XR: 1 controlador, 2 controladores (dominante), queda de controlador com fallback HMD/câmera.
+- [x] (Origem: Fase 13) Executar testes manuais XR: 1 controlador, 2 controladores (dominante), queda de controlador com fallback HMD/câmera.
 - [ ] (Origem: Fase 13) Fechar critérios de aceite: saída válida no bridge em desktop+XR, sem regressão no modo legado e README atualizado para gamepad/XR.
 - [ ] (Origem: Fase 14) Validar início de XR via botão sem DevTools em navegador compatível com headset.
-- [ ] (Origem: Fase 14) Validar encerramento de XR sem recarregar iframe nem perder estado da UI.
-- [ ] (Origem: Fase 14) Garantir mensagem de erro clara quando XR estiver indisponível no wrapper.
+- [x] (Origem: Fase 14) Validar encerramento de XR sem recarregar iframe nem perder estado da UI.
+- [x] (Origem: Fase 14) Garantir mensagem de erro clara quando XR estiver indisponível no wrapper.
 - [ ] (Origem: Fase 15) Validar fluxo `xrStart` no wrapper com headset conectado e permissão concedida.
 
 ---

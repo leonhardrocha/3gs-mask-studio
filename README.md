@@ -9,6 +9,13 @@ Este workspace integra:
 
 O fluxo é: selecionar em VR -> exportar `.ply` com marcação de opacidade -> enviar para bridge -> executar comando CLI (`splat-transform`) -> gerar arquivo de saída filtrado.
 
+## Status atual (Fase 16)
+
+- XR voltou a funcionar em headset com locomoção baseada no rig (pai da câmera), evitando conflito com o rastreamento do HMD.
+- Pipeline XR (black screen) e render contínuo já estão estabilizados.
+- Grid em XR com estereoscopia ainda está pendente de validação/correção final.
+- Próxima etapa técnica ativa: rotação de visualização do splat apenas em memória (sem alterar `x/y/z` originais), com reversão obrigatória antes do export.
+
 Hoje coexistem dois caminhos de exportação no cone-selector:
 
 - fluxo novo: exporta um PLY completo via API oficial do SuperSplat, sobrescreve `opacity` conforme a seleção atual e aplica o filtro no bridge via CLI usando `opacity_raw`
@@ -278,6 +285,13 @@ Comportamento atual do botão `Enviar ao Bridge`:
 
 1. tenta o fluxo novo de exportação completa + filtro CLI por opacidade
 2. se esse fluxo falhar, usa a serialização manual anterior como fallback
+
+### Regra da rotação visual em memória (planejada)
+
+- Rotação aplicada apenas na transformação da entidade do splat em runtime (visualização).
+- Antes de exportar (`scene.write`/bridge), a transformação deve voltar ao snapshot original.
+- Após export, a rotação de preview pode ser reaplicada para manter a UX.
+- Resultado: arquivo final preserva coordenadas originais, pois a escrita continua dirigida por opacidade/seleção.
 
 ## Configuração do plugin
 
