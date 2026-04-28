@@ -883,8 +883,7 @@ function getCurrentPanelParams() {
 function ensureXrPreviewTransformState() {
     const splat = getPrimarySplat();
     const entity = splat?.entity;
-    const pc = window.pc;
-    if (!splat || !entity || !pc) return null;
+    if (!splat || !entity) return null;
 
     if (!xrPreviewTransform || xrPreviewTransform.splat !== splat) {
         const p = entity.getLocalPosition();
@@ -893,7 +892,7 @@ function ensureXrPreviewTransformState() {
         xrPreviewTransform = {
             splat,
             basePos: [p.x, p.y, p.z],
-            baseRot: [r.x, r.y, r.z, r.w],
+            baseRot: r?.clone ? r.clone() : r,
             baseScale: [s.x, s.y, s.z],
             rotXDeg: 0,
             rotZDeg: 0
@@ -905,13 +904,12 @@ function ensureXrPreviewTransformState() {
 
 function applyPreviewRotationToSplat() {
     const st = ensureXrPreviewTransformState();
-    const pc = window.pc;
-    if (!st || !pc) return false;
+    if (!st || !st.baseRot?.clone) return false;
 
-    const baseRot = new pc.Quat(st.baseRot[0], st.baseRot[1], st.baseRot[2], st.baseRot[3]);
-    const deltaRot = new pc.Quat();
+    const baseRot = st.baseRot.clone();
+    const deltaRot = st.baseRot.clone();
     deltaRot.setFromEulerAngles(st.rotXDeg, 0, st.rotZDeg);
-    const outRot = new pc.Quat();
+    const outRot = st.baseRot.clone();
     outRot.mul2(baseRot, deltaRot);
 
     if (typeof st.splat.move === 'function') {
@@ -939,21 +937,14 @@ function rotateSplatPreviewByLeftStick(stickX, stickY, dt = 1 / 60) {
 
 function revertPreviewRotationToSnapshot() {
     const st = xrPreviewTransform;
-    const pc = window.pc;
-    if (!st || !pc || !st.splat?.entity) return false;
+    if (!st || !st.splat?.entity || !st.baseRot) return false;
 
-    const pos = new pc.Vec3(st.basePos[0], st.basePos[1], st.basePos[2]);
-    const rot = new pc.Quat(st.baseRot[0], st.baseRot[1], st.baseRot[2], st.baseRot[3]);
-    const scale = new pc.Vec3(st.baseScale[0], st.baseScale[1], st.baseScale[2]);
-
-    if (typeof st.splat.move === 'function') {
-        st.splat.move(pos, rot, scale);
-    } else {
-        st.splat.entity.setLocalPosition(pos);
-        st.splat.entity.setLocalRotation(rot);
-        st.splat.entity.setLocalScale(scale);
-        window.scene.forceRender = true;
-    }
+    const entity = st.splat.entity;
+    const rot = st.baseRot.clone ? st.baseRot.clone() : st.baseRot;
+    entity.setLocalPosition(st.basePos[0], st.basePos[1], st.basePos[2]);
+    entity.setLocalRotation(rot);
+    entity.setLocalScale(st.baseScale[0], st.baseScale[1], st.baseScale[2]);
+    window.scene.forceRender = true;
 
     return true;
 }

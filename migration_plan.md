@@ -668,10 +668,10 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 - [x] Viabilidade confirmada na documentação/código do SuperSplat: a rotação visual pode ser aplicada na entidade do splat sem editar os arrays originais `x/y/z`.
   - Evidência: `Splat.move(position, rotation, scale)` atua em `entity.setLocalRotation(...)` e atualiza bounds/world transform (`supersplat/src/splat.ts`).
   - Evidência: export usa matriz de transformação em cache durante serialização (`supersplat/src/splat-serialize.ts`), permitindo controle explícito de quando aplicar/reverter transformação.
-- [ ] Implementar modo "rotação de visualização" no wrapper/inject (somente runtime em memória) com chaveamento por botão do controle esquerdo. No modo de "rotação de visualização" é aplicada uma rotação nos planos X e Z de acordo com a entrada da alavanca esquerda, caso contrário a alavanca esquerda é utiliza para a funcionalidade de navegação. Mostrar na UI o modo corrente!
-- [ ] Salvar snapshot de transformação local do splat antes da rotação de preview.
-- [ ] Reverter transformação para snapshot original imediatamente antes de exportar (`scene.write` / bridge) para preservar coordenadas originais. use um dos botões do controle esquerdo disponíveis (não os triggers) para fazer a exportação.
-- [ ] Reaplicar rotação de preview após export (opcional), mantendo UX sem persistir rotação em arquivo.
+- [x] Implementar modo "rotação de visualização" no wrapper/inject (somente runtime em memória) com chaveamento por botão do controle esquerdo. No modo de "rotação de visualização" é aplicada uma rotação nos planos X e Z de acordo com a entrada da alavanca esquerda, caso contrário a alavanca esquerda é utiliza para a funcionalidade de navegação. Mostrar na UI o modo corrente!
+- [x] Salvar snapshot de transformação local do splat antes da rotação de preview.
+- [x] Reverter transformação para snapshot original imediatamente antes de exportar (`scene.write` / bridge) para preservar coordenadas originais. use um dos botões do controle esquerdo disponíveis (não os triggers) para fazer a exportação.
+- [x] Reaplicar rotação de preview após export (opcional), mantendo UX sem persistir rotação em arquivo.
 
 #### Critérios de aceite da Fase 16
 
@@ -692,6 +692,7 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 - Build custom do SuperSplat com suporte XR habilitado.
 - Correções de render XR (pipeline, render contínuo e ajuste parcial do grid no XR).
 - Correções de input unificado (gamepad + XR) e feedback visual do cone.
+- Rotação visual do splat em memória funcionando no `rotation mode`, com snapshot/reversão antes do export e reaplicação após export.
 - Fluxo local com bypass de Service Worker para evitar bundle antigo durante iteração.
 
 ### Problemas ainda em aberto
@@ -700,7 +701,6 @@ Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
 - Comportamento de controles XR ainda pode variar por perfil de headset/controlador.
 - Responsividade/paridade dos controles XR ainda requer ajuste fino por perfil de headset/controlador.
 - Botão VR no app standalone pode depender de condições de runtime (OpenXR/SteamVR/browser/gesto do usuário) mesmo com código ajustado.
-- Rotações de preview em memória devem ser revertidas antes do export para garantir arquivo final com coordenadas originais.
 
 ### Próximos passos recomendados
 
