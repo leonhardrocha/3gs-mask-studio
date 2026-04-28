@@ -626,8 +626,7 @@ function injectPanel() {
 
     // Enviar ao bridge
     document.getElementById('cs-send').addEventListener('click', () => {
-        const { apex, axis, angleDeg, range } = getParams();
-        sendToBridge(statusEl, apex, axis, angleDeg, range);
+        sendCurrentSelectionToBridge();
     });
 
     // Desenha o preview imediatamente ao abrir o painel
@@ -647,17 +646,23 @@ const GP_NAV_DEADZONE = 0.06;
 const GP_AIM_SPEED   = 0.018;  // rad/frame @ deflexão máxima
 const GP_MOVE_SPEED  = 0.04;   // m/frame @ deflexão máxima
 const GP_ANGLE_SPEED = 0.5;    // °/frame @ deflexão máxima
+const XR_PREVIEW_ROT_SPEED_DEG = 70; // deg/s
 
 let gpLoopRunning = false;
 let gpPrevButtons = [];
 let xrPrevButtons = {
     trigger: false,
     clear: false,
-    cycle: false
+    cycle: false,
+    modeToggle: false,
+    export: false
 };
 let xrGridVisibleBeforeSession = null;
 let xrVisualLocomotionBase = null;
 let xrVisualLocomotionOffset = [0, 0, 0];
+let xrLeftMode = 'nav'; // 'nav' | 'rotate'
+let xrPreviewTransform = null;
+let xrBridgeSendInFlight = false;
 let gpLastTs = 0;
 const OP_CYCLE = ['add', 'set', 'remove'];
 
@@ -860,6 +865,120 @@ function getConnectedGamepads() {
         if (p && p.connected) out.push(p);
     }
     return out;
+}
+
+function getPrimarySplat() {
+    const splats = window.scene?.elements?.filter(e => e?.splatData) ?? [];
+    return splats[0] ?? null;
+}
+
+function getCurrentPanelParams() {
+    const apex = document.getElementById('cs-apex')?.value?.trim?.().split(/\s+/).map(Number) ?? [0, 0, 0];
+    const axis = document.getElementById('cs-axis')?.value?.trim?.().split(/\s+/).map(Number) ?? [0, 0, -1];
+    const angleDeg = parseFloat(document.getElementById('cs-angle')?.value ?? '30');
+    const range = parseFloat(document.getElementById('cs-range')?.value ?? '5');
+    return { apex, axis, angleDeg, range };
+}
+
+function ensureXrPreviewTransformState() {
+    const splat = getPrimarySplat();
+    const entity = splat?.entity;
+    const pc = window.pc;
+    if (!splat || !entity || !pc) return null;
+
+    if (!xrPreviewTransform || xrPreviewTransform.splat !== splat) {
+        const p = entity.getLocalPosition();
+        const r = entity.getLocalRotation();
+        const s = entity.getLocalScale();
+        xrPreviewTransform = {
+            splat,
+            basePos: [p.x, p.y, p.z],
+            baseRot: [r.x, r.y, r.z, r.w],
+            baseScale: [s.x, s.y, s.z],
+            rotXDeg: 0,
+            rotZDeg: 0
+        };
+    }
+
+    return xrPreviewTransform;
+}
+
+function applyPreviewRotationToSplat() {
+    const st = ensureXrPreviewTransformState();
+    const pc = window.pc;
+    if (!st || !pc) return false;
+
+    const baseRot = new pc.Quat(st.baseRot[0], st.baseRot[1], st.baseRot[2], st.baseRot[3]);
+    const deltaRot = new pc.Quat();
+    deltaRot.setFromEulerAngles(st.rotXDeg, 0, st.rotZDeg);
+    const outRot = new pc.Quat();
+    outRot.mul2(baseRot, deltaRot);
+
+    if (typeof st.splat.move === 'function') {
+        st.splat.move(undefined, outRot, undefined);
+    } else if (st.splat.entity?.setLocalRotation) {
+        st.splat.entity.setLocalRotation(outRot);
+        window.scene.forceRender = true;
+    }
+
+    return true;
+}
+
+function rotateSplatPreviewByLeftStick(stickX, stickY, dt = 1 / 60) {
+    if (stickX === 0 && stickY === 0) return false;
+
+    const st = ensureXrPreviewTransformState();
+    if (!st) return false;
+
+    st.rotZDeg += stickX * XR_PREVIEW_ROT_SPEED_DEG * dt;
+    st.rotXDeg += (-stickY) * XR_PREVIEW_ROT_SPEED_DEG * dt;
+    st.rotXDeg = Math.max(-89, Math.min(89, st.rotXDeg));
+
+    return applyPreviewRotationToSplat();
+}
+
+function revertPreviewRotationToSnapshot() {
+    const st = xrPreviewTransform;
+    const pc = window.pc;
+    if (!st || !pc || !st.splat?.entity) return false;
+
+    const pos = new pc.Vec3(st.basePos[0], st.basePos[1], st.basePos[2]);
+    const rot = new pc.Quat(st.baseRot[0], st.baseRot[1], st.baseRot[2], st.baseRot[3]);
+    const scale = new pc.Vec3(st.baseScale[0], st.baseScale[1], st.baseScale[2]);
+
+    if (typeof st.splat.move === 'function') {
+        st.splat.move(pos, rot, scale);
+    } else {
+        st.splat.entity.setLocalPosition(pos);
+        st.splat.entity.setLocalRotation(rot);
+        st.splat.entity.setLocalScale(scale);
+        window.scene.forceRender = true;
+    }
+
+    return true;
+}
+
+async function sendCurrentSelectionToBridge() {
+    if (xrBridgeSendInFlight) return;
+    const statusEl = document.getElementById('cs-status');
+    if (!statusEl) return;
+
+    const { apex, axis, angleDeg, range } = getCurrentPanelParams();
+    const hadPreviewRotation = Boolean(xrPreviewTransform);
+
+    xrBridgeSendInFlight = true;
+    if (hadPreviewRotation) {
+        revertPreviewRotationToSnapshot();
+    }
+
+    try {
+        await sendToBridge(statusEl, apex, axis, angleDeg, range);
+    } finally {
+        if (hadPreviewRotation) {
+            applyPreviewRotationToSplat();
+        }
+        xrBridgeSendInFlight = false;
+    }
 }
 
 function getGamepadHand(pad) {
@@ -1190,7 +1309,7 @@ function startGamepadLoop() {
                 const navLabel = xrNavSource ? String(xrNavSource.handedness || 'source') : 'none';
                 const aimLabel = xrAimSource ? String(xrAimSource.handedness || 'source') : 'none';
                 const pair = hasLeft && hasRight ? 'L+R' : (hasRight ? 'R' : (hasLeft ? 'L' : '1x'));
-                indicator.textContent = `XR ${pair} aim:${aimLabel} nav:${navLabel}`;
+                indicator.textContent = `XR ${pair} aim:${aimLabel} nav:${navLabel} mode:${xrLeftMode}`;
             } else {
                 indicator.style.color = gp ? '#4ade80' : '#6b7280';
                 indicator.textContent = gp ? `🎮 ${desktopPads.label}` : '🎮 desconectado';
@@ -1223,11 +1342,38 @@ function startGamepadLoop() {
             }
 
             const aimAxes = gpXr?.axes || [];
+            const gpNav = xrNavSource?.gamepad || null;
+            const hasDedicatedLeft = Boolean(xrNavSource && xrNavSource !== xrSource);
             const rangeAxis = gpDeadZone(aimAxes.length >= 4 ? (aimAxes[3] ?? 0) : 0);
             const angleAxis = gpDeadZone(aimAxes.length >= 4 ? (aimAxes[2] ?? 0) : 0);
-            const observerDelta = moveObserverByLeftStick(lstX, lstY, dt);
-            if (observerDelta) {
+
+            const modeToggle = hasDedicatedLeft && xrButtonPressed(xrNavSource, gpNav, 4);
+            const exportBtn = hasDedicatedLeft && xrButtonPressed(xrNavSource, gpNav, 5);
+
+            if (modeToggle && !xrPrevButtons.modeToggle) {
+                xrLeftMode = xrLeftMode === 'nav' ? 'rotate' : 'nav';
+                const statusEl = document.getElementById('cs-status');
+                if (statusEl) {
+                    statusEl.textContent = xrLeftMode === 'rotate'
+                        ? 'Modo XR left: rotação de visualização (memória)'
+                        : 'Modo XR left: navegação';
+                }
                 dirty = true;
+            }
+
+            if (exportBtn && !xrPrevButtons.export) {
+                sendCurrentSelectionToBridge();
+            }
+
+            if (xrLeftMode === 'rotate') {
+                if (rotateSplatPreviewByLeftStick(lstX, lstY, dt)) {
+                    dirty = true;
+                }
+            } else {
+                const observerDelta = moveObserverByLeftStick(lstX, lstY, dt);
+                if (observerDelta) {
+                    dirty = true;
+                }
             }
             if (rangeAxis !== 0) {
                 previewState.range = Math.min(20, Math.max(0.1, previewState.range + (-rangeAxis * 0.08)));
@@ -1255,6 +1401,8 @@ function startGamepadLoop() {
             xrPrevButtons.trigger = trigger;
             xrPrevButtons.clear = clear;
             xrPrevButtons.cycle = cycle;
+            xrPrevButtons.modeToggle = Boolean(modeToggle);
+            xrPrevButtons.export = Boolean(exportBtn);
 
             if (dirty) {
                 updatePanelFromPreview();
@@ -1271,6 +1419,8 @@ function startGamepadLoop() {
         xrPrevButtons.trigger = false;
         xrPrevButtons.clear = false;
         xrPrevButtons.cycle = false;
+        xrPrevButtons.modeToggle = false;
+        xrPrevButtons.export = false;
         navDebugState.enabled = false;
 
         if (gp) {
