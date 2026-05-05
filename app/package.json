@@ -1,0 +1,13 @@
+{
+  "name": "3gs-mask-studio-app",
+  "version": "0.1.0",
+  "description": "Standalone PlayCanvas Engine app for VR cone-mask selection of Gaussian Splats",
+  "type": "module",
+  "scripts": {
+    "dev": "npx serve . -p 8080",
+    "install-engine": "npm install"
+  },
+  "dependencies": {
+    "playcanvas": "file:../engine"
+  }
+}

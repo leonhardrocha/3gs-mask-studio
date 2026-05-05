@@ -1,617 +1,767 @@
-## 📝 migration_plan.md
-
-O sistema de Scripts do PlayCanvas (pc.Script) é, de fato, o "padrão ouro" para estender funcionalidades sem quebrar o núcleo do sistema.
-
-Para responder sua pergunta técnica: Sim, a Engine do PlayCanvas (e consequentemente o Editor) possui suporte nativo completo para Gaussian Splatting, exatamente como descrito no manual que você citou. O SuperSplat, inclusive, é construído usando essas mesmas funções da Engine.
-
-Aqui está como você pode usar essa abordagem de scripts para criar seu plugin de máscara em VR de forma modular:
-
-### Como implementar isso no contexto do SuperSplat:
-
-1. O Suporte a Gaussian Splatting na Engine
-Desde a versão 1.65, o PlayCanvas trata Gaussian Splatting como um componente de primeira classe (pc.GSplatComponent).
-
-Ele renderiza os pontos usando shaders altamente otimizados.
-
-Ele gerencia a ordenação (sorting) dos pontos em tempo real para transparência.
-
-Ele expõe a propriedade instance, que contém os buffers que você precisa para extrair o .ply.
-
-2. A Abordagem de Script (Sem alterar o SuperSplat)
-Em vez de modificar o código do SuperSplat, você criará um arquivo de script no estilo "Engine". No PlayCanvas, um script é um objeto que se "pendura" em uma Entity e ganha eventos de ciclo de vida como initialize e update.
-
-- Defina o Script: Crie um arquivo vr-masker.js.
-
-- Registre o Script: Use pc.createScript.
-
-- Anexe à Cena: Quando o SuperSplat carregar o modelo, você anexa seu script à entidade que contém o Splat.
-
-
-3. Por que isso é melhor que mexer no index.ts?
-Ao usar o sistema de scripts da Engine dentro do SuperSplat:
-
-- Independência: Seu código de seleção vive em um objeto separado.
-
-- Reuso: Se amanhã você quiser usar essa ferramenta de máscara em um projeto de jogo ou outra aplicação PlayCanvas, o script funcionará da mesma forma.
-
-- Acesso à API de VR: O sistema de scripts tem acesso direto a this.app.xr, que é a API de WebXR da engine, facilitando muito o rastreamento dos controles.
-
-# O Diferencial: O Cálculo do Cone em VR
-
-## Lógica de cálculo do cone e exportação .ply:
-
-```JavaScript
-// vr-masker.js - Seu plugin modular
-var VrMasker = pc.createScript('vr-masker');
-
-VrMasker.prototype.initialize = function() {
-    // Aqui você configura o VR
-    this.app.xr.on('start', this.onXrStart, this);
-    console.log("Plugin de Máscara VR Inicializado");
-};
-
-VrMasker.prototype.update = function(dt) {
-    // Se o gatilho estiver pressionado, calcula o cone de seleção
-    if (this.isSelecting) {
-        this.performConeSelection();
-    }
-};
-```
-
-Para facilitar sua implementação, aqui está a lógica que você deve colocar dentro do update do seu script para a seleção volumétrica:
-
-- Para cada ponto no buffer do Splat, você não quer fazer cálculos pesados toda hora. A abordagem correta é:
-
-- Transformar a posição do ponto para o "Espaço Local" do seu controle VR.
-
-- No espaço local do controle, o eixo do cone é simplificado (geralmente o eixo Z ou Y).
-
-Um ponto está no cone se:
-
-- A distância z estiver entre 0 e alcance_max.
-
-- O raio lateral sqrt(x² + y²) for menor que z * tan(ângulo).
-
-- Essa matemática simplificada no espaço local é muito mais rápida do que usar trigonometria global para milhões de pontos.
-
-
-Para criar essa ferramenta de forma modular e profissional, vamos dividir o código em três partes: o Script da Engine (que lida com o VR e a seleção), o Utilitário de Exportação (que gera o binário) e o Servidor Ponte (que executa seu CLI).
-
-Aqui estão os arquivos que você deve criar na pasta /src/plugins/mask-tool/ do seu repositório clonado:
-
-1. vr-masker.js (O Coração da Ferramenta)Este script usa a API do PlayCanvas para criar o cone visual e realizar o cálculo matemático de interseção.
-
-```JavaScript // src/plugins/mask-tool/vr-masker.js
-var VrMasker = pc.createScript('vr-masker');
-
-VrMasker.attributes.add('coneAngle', { type: 'number', default: 30, title: 'Ângulo do Cone' });
-VrMasker.attributes.add('coneRange', { type: 'number', default: 5, title: 'Alcance (Metros)' });
-
-VrMasker.prototype.initialize = function() {
-    this.isSelecting = false;
-    this.selectedIndices = [];
-    
-    // Criar um cone visual para feedback no VR
-    this.helperCone = this.app.root.findByName('HelperCone') || this.createHelperCone();
-    this.helperCone.enabled = false;
-
-    // Escutar eventos de VR
-    if (this.app.xr) {
-        this.app.xr.on('start', () => console.log("VR Iniciado: Aponte o controle e use o gatilho."));
-    }
-};
-
-VrMasker.prototype.createHelperCone = function() {
-    const entity = new pc.Entity('HelperCone');
-    entity.addComponent('render', { type: 'cone' });
-    entity.setLocalScale(1, this.coneRange, 1);
-    entity.setLocalEulerAngles(-90, 0, 0); // Alinha com o "frente" do controle
-    this.app.root.addChild(entity);
-    return entity;
-};
-
-VrMasker.prototype.update = function(dt) {
-    const inputSources = this.app.xr.input.sources;
-    if (inputSources.length > 0) {
-        const controller = inputSources[0]; // Pega o primeiro controle
-        this.helperCone.setPosition(controller.getPosition());
-        this.helperCone.setRotation(controller.getRotation());
-        
-        // Ativar seleção se o gatilho estiver pressionado
-        if (controller.buttons[0].pressed) {
-            this.helperCone.enabled = true;
-            this.processSelection(controller);
-        } else if (this.helperCone.enabled) {
-            this.helperCone.enabled = false;
-            this.exportSelection(); // Exporta ao soltar o gatilho
-        }
-    }
-};
-
-VrMasker.prototype.processSelection = function(controller) {
-    const splatEntity = this.app.root.findByName('SplatEntity'); // Nome padrão no SuperSplat
-    if (!splatEntity || !splatEntity.gsplat) return;
-
-    const splatData = splatEntity.gsplat.instance.splatData;
-    const worldToLocal = controller.getWorldTransform().clone().invert();
-    
-    const tanAngle = Math.tan(this.coneAngle * Math.PI / 180);
-    const newIndices = [];
-
-    // Otimização: Em um app real, use Web Workers para não travar o VR
-    for (let i = 0; i < splatData.numVertices; i++) {
-        const px = splatData.getProp('x', i);
-        const py = splatData.getProp('y', i);
-        const pz = splatData.getProp('z', i);
-        
-        // Transformar ponto para o espaço local do controle
-        const localPos = new pc.Vec3(px, py, pz);
-        worldToLocal.transformPoint(localPos, localPos);
-
-        // No espaço local do controle (considerando Forward como -Z)
-        const zDist = -localPos.z; 
-        const radiusAtZ = zDist * tanAngle;
-        const radialDist = Math.sqrt(localPos.x * localPos.x + localPos.y * localPos.y);
-
-        if (zDist > 0 && zDist < this.coneRange && radialDist < radiusAtZ) {
-            newIndices.push(i);
-        }
-    }
-    this.selectedIndices = [...new Set([...this.selectedIndices, ...newIndices])];
-};
-```
-
-2. ply-exporter.js (Conversor Binário)Este utilitário pega os índices e cria o arquivo .ply real que o seu CLI entende.
-
-```JavaScript // src/plugins/mask-tool/ply-exporter.js
-export function createPlyBuffer(indices, splatData) {
-    const header = `ply
-format binary_little_endian 1.0
-element vertex ${indices.length}
-property float x
-property float y
-property float z
-property float f_dc_0
-property float f_dc_1
-property float f_dc_2
-property float opacity
-end_header\n`;
-
-    const headerBuffer = new TextEncoder().encode(header);
-    const vSize = 28; // 7 props * 4 bytes (float32)
-    const bodyBuffer = new ArrayBuffer(indices.length * vSize);
-    const view = new DataView(bodyBuffer);
-
-    indices.forEach((idx, i) => {
-        const offset = i * vSize;
-        view.setFloat32(offset + 0, splatData.getProp('x', idx), true);
-        view.setFloat32(offset + 4, splatData.getProp('y', idx), true);
-        view.setFloat32(offset + 8, splatData.getProp('z', idx), true);
-        view.setFloat32(offset + 12, splatData.getProp('f_dc_0', idx), true);
-        view.setFloat32(offset + 16, splatData.getProp('f_dc_1', idx), true);
-        view.setFloat32(offset + 20, splatData.getProp('f_dc_2', idx), true);
-        view.setFloat32(offset + 24, splatData.getProp('opacity', idx), true);
-    });
-
-    return new Blob([headerBuffer, bodyBuffer], { type: 'application/octet-stream' });
-}
-```
-
-3. bridge-server.js (O Servidor Local em Node.js)Este arquivo deve ser rodado fora do navegador (node bridge-server.js). Ele recebe o arquivo e chama seu comando CLI.
-
-```JavaScript // bridge-server.js
-const express = require('express');
-const fs = require('fs');
-const { exec } = require('child_process');
-const cors = require('cors');
-
-const app = express();
-app.use(cors());
-app.use(express.raw({ type: 'application/octet-stream', limit: '500mb' }));
-
-app.post('/process-mask', (req, res) => {
-    const filename = 'temp_mask.ply';
-    fs.writeFileSync(filename, req.body);
-    
-    console.log(`Recebido: ${req.body.length} bytes. Rodando CLI...`);
-
-    // Altere para o seu comando CLI real
-    exec(`meu-conversor-cli --input ${filename} --output mask_output.ply`, (err, stdout, stderr) => {
-        if (err) return res.status(500).send(stderr);
-        res.send("Textura gerada com sucesso!");
-    });
-});
-
-app.listen(3000, () => console.log('Ponte iniciada em http://localhost:3000'));
-```
-
-### Como Integrar sem quebrar o SuperSplat:Cálculo da Interseção: 
-
-A lógica matemática para o volume do cone está descrita abaixo. É fundamental que você use o espaço local do controle para evitar cálculos de matriz complexos por ponto:$$\text{Ponto está no cone se: } 0 < d_{proj} < h \quad \text{e} \quad \sqrt{x_{local}^2 + y_{local}^2} < d_{proj} \cdot \tan(\theta)$$Onde $d_{proj}$ é a profundidade do ponto em relação ao controle.Injeção Simples: No arquivo index.html do SuperSplat clonado, adicione antes do fechamento do </body>:
-```HTML
-<script src="src/plugins/mask-tool/vr-masker.js"></script>
-<script>
-    // Pequeno hook para injetar o script na entidade quando o splat carregar
-    window.addEventListener('load', () => {
-         const app = pc.Application.getApplication();
-         app.on('gsplat:loaded', (entity) => {
-             entity.addComponent('script');
-             entity.script.create('vr-masker');
-         });
-    });
-</script>
-```
-
-Dessa forma, você mantém seu código totalmente separado do núcleo do SuperSplat. Quando você quiser atualizar o SuperSplat com um git pull, seu único trabalho será garantir que o hook no index.html ainda esteja lá.
-
-## Como Integrar sem quebrar o SuperSplat:
-
-### Cálculo da Interseção: 
-
-A lógica matemática para o volume do cone está descrita abaixo. É fundamental que você use o espaço local do controle para evitar cálculos de matriz complexos por ponto:$$\text{Ponto está no cone se: } 0 < d_{proj} < h \quad \text{e} \quad \sqrt{x_{local}^2 + y_{local}^2} < d_{proj} \cdot \tan(\theta)$$Onde $d_{proj}$ é a profundidade do ponto em relação ao controle.Injeção Simples: No arquivo index.html do SuperSplat clonado, adicione antes do fechamento do 
-
-```HTML 
-</body>:HTML<script src="src/plugins/mask-tool/vr-masker.js"></script>
-<script>
-    // Pequeno hook para injetar o script na entidade quando o splat carregar
-    window.addEventListener('load', () => {
-         const app = pc.Application.getApplication();
-         app.on('gsplat:loaded', (entity) => {
-             entity.addComponent('script');
-             entity.script.create('vr-masker');
-         });
-    });
-</script>
-```
-
-Dessa forma, você mantém seu código totalmente separado do núcleo do SuperSplat. Quando você quiser atualizar o SuperSplat com um git pull, seu único trabalho será garantir que o hook no index.html ainda esteja lá.
-
- A abordagem de nuvem de pontos (Point Cloud) tradicional trata cada ponto como um círculo ou quadrado fixo voltado para a câmera. Já as Gaussianas são elipsoides 3D que se deformam dependendo da perspectiva.Se você usar o código dessa demonstração como base, você estaria basicamente reescrevendo o núcleo de renderização do Gaussian Splatting que já existe nativamente no PlayCanvas.Aqui está a análise de como adaptar essa abordagem e por que ela é mais complexa do que uma nuvem de pontos comum:1. Point Cloud vs. Gaussian SplattingNa demonstração que você citou, o shader geralmente calcula apenas a posição gl_Position e um gl_PointSize. Para Gaussianas, o "ponto" precisa de muito mais informação.CaracterísticaNuvem de Pontos (Demo)Gaussian SplattingGeometriaPontos/Esferas simplesElipsoides anisotrópicos (deformáveis)AtributosXYZ + RGBXYZ + RGB + Opacidade + Rotação (Quat) + EscalaShaderDesenha um círculo/quadradoProjeta uma covariância 3D em uma elipse 2DOrdenaçãoGeralmente ignorada ou via Depth BufferObrigatória (Back-to-front) para transparência2. Como fazer (A Lógica do Shader)Para transformar o shader de nuvem de pontos em um de Gaussian Splatting, você precisaria alterar o Vertex Shader para realizar a "Projeção de EWA" (Elliptical Weighted Average).A Matemática no ShaderEm vez de um tamanho de ponto fixo, você calcula a matriz de covariância $\Sigma$ que define a forma da gaussiana no espaço 3D, e então a projeta para o espaço da tela (2D) usando a matriz da câmera $W$:$$\Sigma' = J W \Sigma W^T J^T$$Onde $J$ é a matriz Jacobiana da projeção. O resultado $\Sigma'$ define como o "ponto" deve ser esticado e rotacionado na tela.No Fragment ShaderEm vez de pintar uma cor sólida, você aplicaria o decaimento gaussiano:OpenGL Shading Language// No fragment shader, a intensidade cai conforme a distância do centro `float power = -0.5 * (u * u + v * v); float alpha = exp(power) * opacity;`
-
-3. O Desafio da Ordenação (Sorting)A maior diferença entre a demo de point cloud e o Splatting é que as Gaussianas exigem transparência acumulada ($A \cdot B \cdot C$). Se você desenhar um ponto atrás de um ponto à frente sem ordenar, a imagem ficará cheia de artefatos.O PlayCanvas resolve isso usando:Web Worker: Ordena os índices dos pontos no fundo enquanto a GPU renderiza.Hardware Instancing: Desenha cada gaussiana como um quad (dois triângulos) que se deforma via shader.Vale a pena seguir essa abordagem da Demo?Se o seu objetivo é aprender como o algoritmo funciona por baixo do capô, sim! É um excelente exercício de álgebra linear e GLSL.No entanto, para o seu projeto de ferramenta de máscara em VR, eu recomendo fortemente não usar a abordagem dessa demo e sim o componente nativo pc.GSplat da Engine.Por que?Performance: O componente nativo já lida com o sorting ultra-rápido e compressão de dados.VR: O suporte a VR no pc.GSplat já trata corretamente a projeção para cada olho (Stereo Rendering), algo que seria muito difícil de calibrar manualmente num shader customizado de point cloud.Como integrar no seu Plugin:Em vez de criar o shader do zero, você pode "pegar carona" no material do SuperSplat:
-
-```JavaScript // Acessando o material que já renderiza as gaussianas
-const meshInstance = entity.gsplat.instance.meshInstance;
-const material = meshInstance.material;
-
-// Você pode injetar uma variável no shader original para destacar 
-// os pontos selecionados pelo seu cone (ex: mudar a cor para vermelho)
-material.chunks.APIVar_highlightMask = '... sua lógica de máscara ...';
-material.update();
-```
-lterar o rendering de point cloud para gaussianas, como fazer?
-
-Mudar de uma renderização de Point Cloud para Gaussian Splatting é como passar de desenhar com "bolinhas de gude" para desenhar com "nuvens de spray translúcidas". A complexidade aumenta porque você sai de uma geometria simples e estática para elipses que se deformam conforme a câmera se move.
-
-Se você quer adaptar o código da demonstração de Point Cloud para renderizar Gaussianas, aqui está o roteiro técnico do que você precisa alterar no Shader e no Buffer de Dados:
-
-1. Preparação dos Dados (Buffers)
-Um ponto comum só precisa de XYZ e RGB. Uma Gaussiana precisa de muito mais para definir sua forma no espaço:
-
-| Característica | Nuvem de Pontos (Demo) | Gaussian Splatting |
-|-----------------|------------------------|--------------------|
-| **Geometria** | Pontos/Esferas simples | Elipsoides anisotrópicos (deformáveis) |
-| **Atributos** | XYZ + RGB | XYZ + RGB + Opacidade + Rotação (Quat) + Escala |
-| **Shader** | Desenha um círculo/quadrado | Projeta uma covariância 3D em uma elipse 2D |
-| **Ordenação** | Geralmente ignorada ou via Depth Buffer | Obrigatória (Back-to-front) para transparência |
-
-2. O Vertex Shader: A Transformação de EWA
-No Point Cloud, você apenas projeta o ponto. No Gaussian Splatting, você precisa projetar uma elipse. A matemática baseia-se na matriz de covariância Σ.
-
-Construa a Matriz de Escala (S) e Rotação (R) a partir dos atributos.
-
-Calcule a Covariância 3D (Σ):
-
-$$\Sigma' = J W \Sigma W^T J^T$$
- 
-Projete para o Espaço da Tela: 
-
-Use a matriz da câmera (W) e a matriz Jacobiana (J) da projeção para obter a covariância 2D:
- 
-No shader, você usará essa matriz $$\Sigma' = J W \Sigma W^T J^T$$ para determinar o tamanho e a inclinação do "quad" (ou ponto expandido) que será desenhado.
-
-3. O Fragment Shader: O Decaimento Gaussiano
-Diferente de um ponto sólido, a Gaussiana é transparente nas bordas. No Fragment Shader, você recebe as coordenadas locais do fragmento em relação ao centro do ponto (geralmente variando de -1 a 1).
-
-A intensidade (alpha) é calculada pela função exponencial:
-
-$$G(x) = \exp(-0.5 \cdot (d^T \Sigma'^{-1} d))$$
-
-
-Onde d é o vetor de distância do pixel ao centro da elipse.
-
-```OpenGL Shading Language
-// Exemplo simplificado de Fragment Shader
-varying vec2 vUv; // Coordenadas do Quad
-varying float vOpacity;
-
-void main() {
-    float d = dot(vUv, vUv); // Distância radial
-    float alpha = exp(-0.5 * d) * vOpacity;
-    
-    if (alpha < 0.01) discard; // Otimização para pixels quase invisíveis
-    
-    gl_FragColor = vec4(vColor, alpha);
-}
-```
-
-4. O Grande Desafio: Ordenação (Sorting)
-Este é o ponto onde a maioria das implementações customizadas falha. No Point Cloud, o Z-Buffer resolve quem está na frente. No Gaussian Splatting, como tudo é translúcido, você precisa desenhar do fundo para a frente (Back-to-Front).
-
-Para adaptar a demo com `example.mjs`:
-
-```Javascript
-import files from 'examples/files';
-import { rootPath, deviceType } from 'examples/utils';
-
-const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
-window.focus();
-
-const gfxOptions = {
-    deviceTypes: [deviceType],
-    glslangUrl: `${rootPath}/static/lib/glslang/glslang.js`,
-    twgslUrl: `${rootPath}/static/lib/twgsl/twgsl.js`
-};
-
-const device = await pc.createGraphicsDevice(canvas, gfxOptions);
-device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
-
-const createOptions = new pc.AppOptions();
-createOptions.graphicsDevice = device;
-
-createOptions.componentSystems = [pc.RenderComponentSystem, pc.CameraComponentSystem];
-createOptions.resourceHandlers = [pc.TextureHandler, pc.ContainerHandler];
-
-const app = new pc.AppBase(canvas);
-app.init(createOptions);
-
-const assets = {
-    statue: new pc.Asset('statue', 'container', { url: `${rootPath}/static/assets/models/statue.glb` })
-};
-
-const assetListLoader = new pc.AssetListLoader(Object.values(assets), app.assets);
-assetListLoader.load(() => {
-    // Set the canvas to fill the window and automatically change resolution to be the same as the canvas size
-    app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
-    app.setCanvasResolution(pc.RESOLUTION_AUTO);
-
-    // Ensure canvas is resized when window changes size
-    const resize = () => app.resizeCanvas();
-    window.addEventListener('resize', resize);
-    app.on('destroy', () => {
-        window.removeEventListener('resize', resize);
-    });
-
-    // Create an Entity with a camera component
-    const camera = new pc.Entity();
-    camera.addComponent('camera', {
-        clearColor: new pc.Color(0.1, 0.1, 0.1)
-    });
-    camera.translate(0, 7, 24);
-
-    // Add entity into scene hierarchy
-    app.root.addChild(camera);
-    app.start();
-
-    // Create a new Entity
-    const entity = assets.statue.resource.instantiateRenderEntity();
-    app.root.addChild(entity);
-
-    // Create a new material with a custom shader
-    const material = new pc.ShaderMaterial({
-        uniqueName: 'MyShader',
-        vertexGLSL: files['shader.vert'],
-        fragmentGLSL: files['shader.frag'],
-        attributes: {
-            aPosition: pc.SEMANTIC_POSITION,
-            aUv0: pc.SEMANTIC_TEXCOORD0
-        }
-    });
-
-    // find all render components
-    const renderComponents = entity.findComponents('render');
-
-    // for all render components
-    renderComponents.forEach((/** @type {pc.RenderComponent} */ render) => {
-        // For all meshes in the render component, assign new material
-        render.meshInstances.forEach((meshInstance) => {
-            meshInstance.material = material;
-        });
-
-        // set it to render as points
-        render.renderStyle = pc.RENDERSTYLE_POINTS;
-    });
-
-    let currentTime = 0;
-    app.on('update', (dt) => {
-        // Update the time and pass it to shader
-        currentTime += dt;
-        material.setParameter('uTime', currentTime);
-
-        // Rotate the model
-        entity.rotate(0, 15 * dt, 0);
-    });
-});
-
-export { app };
-```
-
-e `control.mjs`:
-
-```Javascript
-/**
- * @param {import('../src/app/components/Example.mjs').ControlOptions} options - The options.
- * @returns {JSX.Element} The returned JSX Element.
- */
-function controls({ fragment }) {
-    return fragment();
-}
-
-export { controls };
-```
-
-e OpenGL Shaders:
-
-```c OpenGL Fragment Shader // shader.frag
-precision lowp float;
-varying vec4 outColor;
-
-void main(void)
-{
-    // just output color supplied by vertex shader
-    gl_FragColor = outColor;
-}
-```
-
-```c OpenGL Vertex Shader // shader.vert
-// Attributes per vertex: position
-attribute vec4 aPosition;
-
-uniform mat4   matrix_viewProjection;
-uniform mat4   matrix_model;
-
-// time
-uniform float uTime;
-
-// Color to fragment program
-varying vec4 outColor;
-
-void main(void)
-{
-    // Transform the geometry
-    mat4 modelViewProj = matrix_viewProjection * matrix_model;
-    gl_Position = modelViewProj * aPosition;
-
-    // vertex in world space
-    vec4 vertexWorld = matrix_model * aPosition;
-
-    // use sine way to generate intensity value based on time and also y-coordinate of model
-    float intensity = abs(sin(0.6 * vertexWorld.y + uTime * 1.0));
-
-    // intensity smoothly drops to zero for smaller values than 0.9
-    intensity = smoothstep(0.9, 1.0, intensity);
-
-    // point size depends on intensity
-    // WebGPU doesn't support setting gl_PointSize to anything besides a constant 1.0
-    #ifndef WEBGPU
-        gl_PointSize = clamp(12.0 * intensity, 1.0, 64.0);
-    #endif
-
-    // color mixes red and yellow based on intensity
-    outColor = mix(vec4(1.0, 1.0, 0.0, 1.0), vec4(0.9, 0.0, 0.0, 1.0), intensity);
-}
-```
-
-Você precisará de uma função em JavaScript/C++ (rodando em uma CPU ou Compute Shader) que reordene os índices dos pontos a cada frame, baseada na distância da câmera.
-
-Envie esses índices ordenados para a GPU a cada mudança de ângulo da câmera.
-
-Por que usar a Engine do PlayCanvas em vez de fazer do zero?
-A Engine já resolve toda essa matemática pesada:
-
-- Splat Sorting: Já vem com um ordenador em Web Worker (super rápido).
-
-- Instancing: Ela desenha quads deformados de forma muito mais eficiente do que o gl.POINTS.
-
-- SH: Já faz a conversão de Harmônicos Esféricos para RGB linear.
-
-Como aplicar isso agora:
-Se você já tem o código de Point Cloud e quer transformá-lo, o caminho mais rápido é substituir o seu pc.Mesh de pontos por um pc.GSplatInstance. Se você realmente quer escrever o shader na mão (pela demo), você terá que trocar o primitive type de pc.PRIMITIVE_POINTS para pc.PRIMITIVE_TRIANGLES (usando instanciamento de quads) para conseguir as elipses deformadas.
-
-# Plano de Migração: Point Cloud para 3DGS Masking
-
-Checklist reestruturado e validado com base nos READMEs de:
-
-- Raiz: `README.md`
-- Engine: `engine/README.md`
-- SuperSplat: `supersplat/README.md`
-- Splat Transform: `splat-transform/README.md`
-
-## Fase 0: Verificação de Base (estado atual)
-
-- [x] Submódulos presentes no workspace (`engine`, `supersplat`, `splat-transform`).
-- [x] Comando de bootstrap confirmado: `git submodule update --init --recursive`.
-- [x] Divergência de documentação local registrada: a raiz menciona `tools/bridge-server`, pasta ausente no estado atual; correção operacional será implementada na Fase 2.
-
-## Fase 1: Ambiente e Build (sem plugin)
-
-- [x] Instalar dependências do SuperSplat: `npm install` em `supersplat/`.
-- [x] Subir SuperSplat conforme README oficial: `npm run develop` em `supersplat/`.
-- [x] Validar acesso local do editor em `http://localhost:3000`.
-- [x] Instalar dependências da Engine: `npm install` em `engine/`.
-- [x] Build base da Engine: `npm run build` em `engine/`.
-- [x] Testes da Engine (sanidade): `npm test` em `engine/`.
-- [x] Instalar dependências do Splat Transform: `npm install` em `splat-transform/`.
-- [x] Testes do Splat Transform: `npm test` em `splat-transform/`.
-
-Observacao operacional: `engine/npm test` usa assets via `localhost:3000`; manter essa porta livre de outros servidores (ex.: SuperSplat) durante a execucao dos testes.
-
-## Fase 2: Ponte Node (Bridge Server)
-
-- [x] Criar pasta `tools/bridge-server/` (alinhando com o README raiz).
-- [x] Inicializar servidor HTTP local com CORS e endpoint `POST /process-mask`.
-- [x] Implementar recepção binária `application/octet-stream` para `.ply`.
-- [x] Integrar execução de CLI via `child_process` com tratamento de erro, timeout e logs.
-- [x] Validar fluxo mínimo: receber arquivo, salvar temporário, executar comando e retornar status.
-
-Implementado: comando CLI configuravel por variavel de ambiente `MASK_CLI_CMD`, com suporte a placeholders `{input}` e `{output}`.
-
-## Fase 3: Plugin de Máscara VR no SuperSplat
-
-- [x] Criar `supersplat/src/plugins/mask-tool/vr-masker.ts`.
-- [x] Criar `supersplat/src/plugins/mask-tool/ply-exporter.ts`.
-- [x] Definir ponto de injeção sem alterar o core da engine (launcher/hook de carregamento do splat).
-- [x] Implementar helper visual do cone acoplado ao controle XR.
-- [x] Implementar captura de input do controle (pressionar/soltar gatilho).
-
-Progresso 3.1: `vrMasker` registrado no `ToolManager` e integrado ao fluxo de selecao usando fallback por esfera para validar ativacao/eventos antes da intersecao de cone XR.
-Progresso 3.2: `ply-exporter` integrado com exportacao em memoria e envio para bridge (`POST /process-mask`) ao finalizar selecao (`select.stop` e `select.once`).
-
-## Fase 4: Seleção Volumétrica e Exportação
-
-- [ ] Implementar teste no espaço local do controle:
-    - `0 < z < coneRange`
-    - `sqrt(x^2 + y^2) < z * tan(coneAngle)`
-- [ ] Acumular índices selecionados sem duplicação.
-- [ ] Extrair propriedades mínimas (`x`, `y`, `z`, `f_dc_0..2`, `opacity`).
-- [ ] Gerar `.ply` em `binary_little_endian` com cabeçalho consistente.
-- [ ] Enviar buffer para a bridge via `fetch`.
-
-## Fase 5: Integração com Splat Transform e pipeline de máscara
-
-- [ ] Substituir CLI placeholder por comando real usando `splat-transform`.
-- [ ] Definir contrato de entrada/saída (arquivos temporários, pasta de output, nomes).
-- [ ] Encadear pós-processamento para textura/máscara conforme pipeline do projeto.
-- [ ] Validar round-trip: VR seleciona -> `.ply` exporta -> bridge processa -> artefato final disponível.
-
-## Fase 6: Performance e Robustez
-
-- [ ] Medir custo por frame da seleção com cena grande (objetivo: evitar stutter em VR).
-- [ ] Aplicar estratégia incremental (chunking) ou Worker para seleção em background.
-- [ ] Adicionar debounce/janela de atualização para export durante interação contínua.
-- [ ] Testar falhas de rede, CLI indisponível e arquivos inválidos.
-
-## Fase 7: Documentação e Entrega
-
-- [ ] Atualizar `README.md` raiz com comandos reais usados no workspace.
-- [ ] Documentar setup completo do bridge (`tools/bridge-server`) e variáveis de ambiente.
-- [ ] Registrar guia rápido de operação (modo dev, fluxo VR, troubleshooting).
-- [ ] Congelar checklist final com critérios de aceite por fase.
+# 📝 Plano de Migração — 3GS Mask Studio
+
+> **Princípio diretor**: o código-fonte dos submódulos **não é alterado**.
+> Todo código de produto vive em `app/` e `tools/`, como scripts modulares
+> `.mjs` que se integram ao ciclo de vida da engine via `pc.Script`.
 
 ---
 
-## Nota de Integração Engine <-> SuperSplat
+## Submódulos do workspace
 
-Para testar mudanças locais da engine no SuperSplat, prefira alias para `engine/src/index.js` (ou build local), em vez de depender apenas do pacote publicado.
+| Pasta              | Repositório                                         | Papel                                               |
+|--------------------|-----------------------------------------------------|-----------------------------------------------------|
+| `engine/`          | https://github.com/playcanvas/engine                | Motor de renderização 3GS + API de scripts          |
+| `editor/`          | https://github.com/playcanvas/editor                | Editor visual PlayCanvas (criação de cena/assets)   |
+| `supersplat/`      | https://github.com/playcanvas/supersplat            | Editor de Gaussian Splats (não alterado)            |
+| `splat-transform/` | https://github.com/playcanvas/splat-transform       | CLI de pós-processamento do `.ply`                  |
 
-Exemplo de direção técnica (ajustar para o bundler atual do SuperSplat):
+Inicializar todos:
 
-```javascript
-export default {
-    resolve: {
-        alias: {
-            playcanvas: path.resolve(__dirname, '../engine/src/index.js')
-        }
-    }
+```bash
+git submodule update --init --recursive
+```
+
+---
+
+## Por que usar engine + pc.Script em vez de alterar o SuperSplat
+
+O PlayCanvas trata Gaussian Splatting como componente de primeira classe desde
+a versão 1.65 (`pc.GSplatComponent`).  
+Referência oficial: https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/
+
+| Recurso                   | SuperSplat (fork) | Engine + pc.Script (este projeto) |
+|---------------------------|-------------------|-----------------------------------|
+| Código-fonte original     | Alterado          | Intocado                          |
+| Atualização via git pull  | Conflitos         | Transparente                      |
+| Reutilização do script    | Acoplado ao app   | Qualquer projeto PlayCanvas       |
+| Acesso a WebXR            | Indireto          | `this.app.xr` nativo              |
+| Suporte 3GS nativo        | Via SuperSplat    | `pc.GSplatComponent` direto       |
+
+---
+
+## Estrutura do projeto (apenas código próprio)
+
+```
+app/
+  index.html                  # host mínimo do app PlayCanvas
+  main.mjs                    # cria pc.Application, carrega splat, anexa scripts
+  scripts/
+    vr-masker.mjs             # pc.Script — seleção por cone + envio ao bridge
+    ply-exporter.mjs          # utilitário — exporta buffer PLY binário (opacity_raw)
+    cone-shader.vert.glsl     # shader GLSL — cone helper visual (uso futuro)
+    cone-shader.frag.glsl     # shader GLSL — cone helper visual (uso futuro)
+tools/
+  bridge-server/              # servidor Node.js — recebe PLY, executa CLI
+```
+
+---
+
+## Como os scripts modulares `.mjs` funcionam na Engine
+
+Os arquivos de demo oficiais da engine seguem exatamente este padrão e ficam em:
+
+```
+engine/examples/src/examples/gaussian-splatting/
+  simple.example.mjs
+  viewer.example.mjs
+  shader-effects.example.mjs         ← shader customizado sobre GSplat
+  multi-splat.shader.glsl.vert       ← vertex shader de referência
+```
+
+Um script de "jogo" PlayCanvas usa `pc.createScript` e é estruturado assim:
+
+```js
+// app/scripts/vr-masker.mjs
+import * as pc from '../../engine/build/playcanvas/src/index.js';
+
+const VrMasker = pc.createScript('vrMasker');
+
+VrMasker.attributes.add('coneAngleDeg', { type: 'number', default: 30 });
+VrMasker.attributes.add('coneRange',    { type: 'number', default: 5  });
+VrMasker.attributes.add('bridgeUrl',    { type: 'string',
+    default: 'http://localhost:3001/process-mask' });
+
+VrMasker.prototype.initialize = function () {
+    this._selected = new Set();
+    // Escuta input XR
+    this.app.xr?.input.on('add', src => { this._xrSource = src; });
+};
+
+VrMasker.prototype.update = function (dt) {
+    const trigger = this._xrSource?.getButton(0) ??
+                    this.app.keyboard.isPressed(pc.KEY_SPACE);
+    if (trigger) this._doSelection();
+    else if (this._wasActive) this._sendToBridge();
+    this._wasActive = trigger;
 };
 ```
+
+---
+
+## Matemática de seleção por cone
+
+O predicado opera no **espaço local do controlador XR** para evitar operações
+de matriz por ponto. Um ponto $p$ está dentro do cone se:
+
+$$0 < d_{\text{proj}} < h \qquad \text{e} \qquad \sqrt{x_L^2 + y_L^2} < d_{\text{proj}} \cdot \tan(\theta)$$
+
+Onde $d_{\text{proj}} = -z_L$ é a profundidade no eixo local do controlador
+(eixo $-Z$ = frente), e $\theta$ é o ângulo do cone.
+
+---
+
+## Shaders GLSL — cone helper visual (uso futuro)
+
+Os shaders abaixo seguem a estrutura de
+`engine/examples/src/examples/gaussian-splatting/shader-effects.example.mjs`
+e serão aplicados a uma primitiva criada via **PlayCanvas Editor** (`editor/`).
+
+### Vertex shader — `app/scripts/cone-shader.vert.glsl`
+
+```glsl
+// cone-shader.vert.glsl
+// Primitiva de cone que representa o volume de seleção VR.
+// Uniforms injetados automaticamente pela engine:
+//   matrix_viewProjection, matrix_model
+
+attribute vec4 aPosition;
+
+uniform mat4  matrix_viewProjection;
+uniform mat4  matrix_model;
+uniform float uConeRange;       // comprimento do cone em metros
+uniform float uConeAngleTan;    // tan(coneAngleDeg * PI / 180)
+
+varying vec3 vLocalPos;
+
+void main(void) {
+    vLocalPos = aPosition.xyz;
+
+    // Escala a primitiva para corresponder ao cone configurado
+    vec4 scaled = aPosition;
+    scaled.y   *= uConeRange;                     // eixo de profundidade
+    scaled.xz  *= uConeRange * uConeAngleTan;     // raio radial
+
+    gl_Position = matrix_viewProjection * matrix_model * scaled;
+}
+```
+
+### Fragment shader — `app/scripts/cone-shader.frag.glsl`
+
+```glsl
+// cone-shader.frag.glsl
+// Decaimento gaussiano para feedback visual suave do cone.
+// Mesmo padrão do fragment shader 3GS:
+//   float alpha = exp(-0.5 * dot(d, d)) * opacity;
+
+precision mediump float;
+
+varying vec3 vLocalPos;
+uniform vec4 uConeColor;   // ex.: vec4(0.2, 0.8, 1.0, 0.3)
+
+void main(void) {
+    // Distância radial normalizada (0 = eixo central, 1 = borda)
+    float r = length(vLocalPos.xz);
+
+    // Decaimento gaussiano radial — mesma função dos splats
+    float alpha = exp(-2.0 * r * r) * uConeColor.a;
+
+    if (alpha < 0.01) discard;
+
+    gl_FragColor = vec4(uConeColor.rgb, alpha);
+}
+```
+
+> Os shaders serão aplicados via `pc.ShaderMaterial` a uma primitiva criada no
+> **PlayCanvas Editor** (`editor/`, submódulo `v2.20.8`), que usa a mesma
+> engine como dependência.
+
+---
+
+## Pipeline CLI sem hardcode (bridge)
+
+Para evitar lógica fixa no bridge, o processamento deve ser dividido em 3 etapas
+parametrizadas por variáveis de ambiente:
+
+- `SELECT_CLI_CMD`: isola as gaussianas selecionadas pelo cone.
+- `MASK_CLI_CMD`: aplica pós-processamento de máscara/limpeza.
+- `EXPORT_CLI_CMD`: gera o arquivo final com sufixo `_output`.
+
+### Contrato de placeholders (proposto)
+
+Além de `{input}` e `{output}`, o bridge deve suportar placeholders intermediários
+para encadear comandos sem hardcode de caminho:
+
+- `{input}`: arquivo recebido no `POST /process-mask`.
+- `{selected}`: saída da etapa de seleção.
+- `{masked}`: saída da etapa de máscara.
+- `{output}`: saída final definida pelo bridge (com sufixo).
+
+### Comandos sugeridos
+
+```env
+# 1) Seleção: mantém apenas gaussianas marcadas no exportador VR
+# Convenção atual do app: opacity_raw = +100 (selecionada), -100 (não selecionada)
+SELECT_CLI_CMD=splat-transform -w {input} -V opacity_raw,gt,0 {selected}
+
+# 2) Máscara/limpeza: remove floaters na nuvem já selecionada
+# Formato: -G [voxelSize,opacityCutoff,minContribution]
+MASK_CLI_CMD=splat-transform -w {selected} -G 0.05,0.1,0.004 {masked}
+
+# 3) Export final: grava o resultado final em .ply
+EXPORT_CLI_CMD=splat-transform -w {masked} {output}
+```
+
+### Regra de nome de saída (sufixo `_output`)
+
+O bridge deve derivar `{output}` a partir do nome base do arquivo de entrada:
+
+- Entrada: `scene.ply`
+- Saída: `scene_output.ply`
+
+Se necessário, manter em `.env` um sufixo configurável:
+
+```env
+MASK_OUTPUT_SUFFIX=_output
+MASK_OUTPUT_EXT=.ply
+```
+
+### Observações sobre `-V` vs `-G`
+
+- `-V` (`--filter-value`) é o filtro determinístico da seleção do cone
+  (recomendado para etapa `SELECT_CLI_CMD`).
+- `-G` (`--filter-floaters`) é limpeza geométrica adicional após seleção
+  (recomendado para etapa `MASK_CLI_CMD`).
+- Para o caso "manter somente seleção", `SELECT_CLI_CMD` sozinho já resolve.
+
+---
+
+## Plano de fases
+
+### Fase 1 — Ambiente
+
+- [x] Submódulos: `engine`, `editor`, `supersplat`, `splat-transform`.
+- [x] `npm install` em `supersplat/` e `tools/bridge-server/`.
+- [x] Bridge server operando (`tools/bridge-server/`).
+
+### Fase 2 — App Engine standalone (`feat/engine-app`)
+
+- [x] `app/index.html`, `app/main.mjs`, `app/package.json` criados.
+- [x] `app/scripts/vr-masker.mjs` — `pc.Script` com cone + bridge.
+- [x] Renomear `main.js` → `main.mjs` (ESM puro, sem `require`).
+- [x] Validar fluxo `?splat=<url>` (parsing da query + tentativa de carga via `app.assets.loadFromUrl`).
+
+### Fase 3 — Shaders e primitiva de cone
+
+- [x] Criar `app/scripts/cone-shader.vert.glsl` e `cone-shader.frag.glsl`.
+- [x] Suportar primitiva de cone como asset de cena (`ConeHelper`) com fallback runtime.
+- [x] Aplicar `pc.ShaderMaterial` com os shaders acima ao cone helper.
+- [x] Ligar posição/rotação do cone ao controlador XR em tempo real.
+
+### Fase 4 — Pipeline completo
+
+- [x] Round-trip validado: seleção VR → PLY exportado → bridge → `splat-transform` → artefato.
+- [x] Testes: `cone-math`, `ply-exporter`, `round-trip` em `tools/bridge-server`.
+
+### Fase 5 — Performance
+
+- [x] Seleção incremental (chunks) para evitar stutter em VR (> 1M gaussianas).
+- [x] Web Worker opcional para seleção fora da thread de renderização (com fallback local).
+
+### Fase 6 — Pipeline CLI configurável (sem hardcode)
+
+- [x] Expandir bridge para suportar `SELECT_CLI_CMD`, `MASK_CLI_CMD`, `EXPORT_CLI_CMD`.
+- [x] Implementar execução em cadeia com arquivos temporários (`{selected}` → `{masked}` → `{output}`).
+- [x] Validar placeholders obrigatórios e retornar erro 501/400 com mensagem clara quando ausentes.
+- [x] Preservar compatibilidade: se só `MASK_CLI_CMD` existir, manter modo legado de etapa única.
+
+### Fase 7 — Política de saída e export
+
+- [x] Implementar nome de saída com sufixo `_output` sobre o basename de entrada.
+- [x] Tornar sufixo/extensão configuráveis por ambiente (`MASK_OUTPUT_SUFFIX`, `MASK_OUTPUT_EXT`).
+- [x] Garantir `-w/--overwrite` em todos os comandos para evitar falhas por arquivo existente.
+- [x] Cobrir com testes de contrato: nome final, encadeamento e fallback legado.
+
+---
+
+## Análise — Problemas de renderização e ferramenta de seleção
+
+> Diagnóstico realizado após teste manual do fluxo descrito no README. Os
+> comandos CLI funcionam (bridge validado em HTTP), mas o viewer não renderiza
+> e não há ferramenta de seleção por cone visível.
+
+### Raiz dos problemas identificados
+
+#### Problema 1 — `app/main.mjs` usa a API legada `pc.Application`
+
+A engine PlayCanvas tem duas superfícies de API:
+
+| API | Status | Suporte GSplat |
+|-----|--------|----------------|
+| `pc.Application(canvas, opts)` | **Legada** — ainda presente mas não registra sistemas automaticamente | Não registra `GSplatComponentSystem` por padrão |
+| `pc.AppBase` + `pc.AppOptions` | **Atual** — usada por todos os exemplos oficiais | Exige registro explícito de `GSplatComponentSystem` e `GSplatHandler` |
+
+O `app/main.mjs` atual cria `new pc.Application(canvas, {...})` sem registrar
+os sistemas de GSplat. Mesmo que o arquivo `.ply` seja carregado, a engine não
+sabe renderizá-lo porque `GSplatComponentSystem` está ausente.
+
+**Evidência**: todos os exemplos em `engine/examples/src/examples/gaussian-splatting/`
+usam o padrão:
+
+```js
+const createOptions = new pc.AppOptions();
+createOptions.graphicsDevice = device;
+createOptions.componentSystems = [
+    pc.RenderComponentSystem,
+    pc.CameraComponentSystem,
+    pc.GSplatComponentSystem    // ← obrigatório
+];
+createOptions.resourceHandlers = [
+    pc.TextureHandler,
+    pc.ContainerHandler,
+    pc.GSplatHandler            // ← obrigatório para carregar .ply como gsplat
+];
+const app = new pc.AppBase(canvas);
+app.init(createOptions);
+```
+
+Referência: `engine/examples/src/examples/gaussian-splatting/simple.example.mjs`
+
+#### Problema 2 — SuperSplat não tem ferramenta de seleção por cone
+
+O SuperSplat (`supersplat/`) já tem ferramentas de seleção em sua barra inferior:
+rect, brush, flood, polygon, lasso, sphere, box, eyedropper. Porém:
+
+- Não existe ferramenta de seleção por **cone** (volume frustum 3D).
+- Não existe integração nativa com o bridge server para envio do PLY selecionado.
+- O `ToolManager` interno (`supersplat/src/tools/tool-manager.ts`) **não é exposto
+  globalmente** — apenas `window.scene` é exposto.
+
+**O SuperSplat renderiza normalmente** quando um arquivo `.ply` é carregado
+(drag-drop ou parâmetro `?load=<url>`). O canvas aparece vazio porque nenhum
+arquivo está carregado por padrão.
+
+#### Problema 3 — Dois "viewers" concorrentes sem separação clara de papel
+
+O README orienta a usar o SuperSplat como visualizador, mas o `app/` standalone
+foi criado como a surface primária do produto (fases 2–5). Essa ambiguidade
+causa confusão sobre onde a ferramenta de cone deve viver.
+
+---
+
+### Estratégia de extensão do SuperSplat sem alterar fonte
+
+O SuperSplat expõe `window.scene` em tempo de execução. A partir desse objeto
+é possível:
+
+```js
+// Acessível pelo console do navegador ou por script injetado
+const { events } = window.scene;
+
+// Disparar seleção por esfera em coordenadas de mundo
+events.fire('select.bySphere', 'add', [cx, cy, cz, radius]);
+
+// Disparar seleção por box alinhada ao eixo
+events.fire('select.byBox', 'set', [cx, cy, cz, lenX, lenY, lenZ]);
+
+// Limpar seleção
+events.fire('select.none');
+
+// Acessar dados brutos dos splats
+const splat = window.scene.elements[0];        // primeiro GSplat carregado
+const x = splat.splatData.getProp('x');        // Float32Array das posições X
+const y = splat.splatData.getProp('y');
+const z = splat.splatData.getProp('z');
+const state = splat.splatData.getProp('state'); // Uint8Array: 0=unselected, 1=selected, 2=deleted
+```
+
+Isso abre duas vias de extensão sem alterar `supersplat/src/`:
+
+**Via A — Bookmarklet / snippet de console**
+
+Um script `.mjs` em `tools/cone-selector/inject.mjs` que, quando executado no
+contexto da página SuperSplat, injeta um painel flutuante na DOM com controles
+de cone e chama `events.fire('select.bySphere', ...)` N vezes ao longo do eixo
+do cone para aproximar a seleção cônica.
+
+```
+Vantagem : não requer build, funciona com qualquer versão do SuperSplat.
+Limitação: aproximação por esferas não é cone exato; número de esferas
+           ≈ range / (radius_médio) afeta precisão vs. performance.
+```
+
+**Via B — Manipulação direta do array `state` (cone exato)**
+
+Pelo acesso a `splat.splatData.getProp('state')` + `splat.updateState()` é
+possível aplicar o predicado de cone exato (mesma função de `select-cone.mjs`)
+diretamente nos dados do splat carregado no SuperSplat, sem usar os eventos de
+seleção interna.
+
+```js
+// Pseudo-código do snippet de console
+const splat = window.scene.elements[0];
+const x = splat.splatData.getProp('x');
+const y = splat.splatData.getProp('y');
+const z = splat.splatData.getProp('z');
+const state = splat.splatData.getProp('state');
+
+const apex = { x: 0.07, y: 0.25, z: 0.41 };
+const axis = { x: -0.22, y: -0.44, z: -0.87 };
+const tanA = Math.tan(30 * Math.PI / 180);
+const range = 5;
+
+for (let i = 0; i < splat.numSplats; i++) {
+    const dx = x[i] - apex.x, dy = y[i] - apex.y, dz = z[i] - apex.z;
+    const t = dx * axis.x + dy * axis.y + dz * axis.z;
+    if (t > 0 && t < range) {
+        const rx = dx - t * axis.x, ry = dy - t * axis.y, rz = dz - t * axis.z;
+        if ((rx*rx + ry*ry + rz*rz) < (t * tanA) ** 2) state[i] |= 1; // marca selecionado
+    }
+}
+splat.updateState();              // sobe texture — gaussianas ficam destacadas na UI
+window.scene.forceRender = true;
+```
+
+> **Verificar** se `splat.updateState()` é método público acessível no build
+> produção. Se não for, a alternativa é forçar upload manual:
+> `splat.stateTexture.lock()` → modificar → `splat.stateTexture.unlock()`.
+
+**Via C — Página wrapper com iframe (integração ponte)**
+
+Uma página HTML (`tools/cone-selector/index.html`) que:
+
+1. Incorpora SuperSplat em um `<iframe src="http://localhost:3000">`.
+2. Adiciona painel de cone na página pai.
+3. Usa `contentWindow.window.scene` para executar o snippet da Via B.
+4. Após seleção, serializa o PLY das gaussianas selecionadas e envia ao bridge.
+
+```
+Vantagem : UI separada, não altera SuperSplat, pode ter painel completo.
+Limitação: requer same-origin (iframe SuperSplat servido pelo mesmo host) ou
+           que SuperSplat permita cross-origin scripts — verificar CSP do build.
+```
+
+---
+
+### Fase 8 — Corrigir renderização GSplat no `app/` standalone
+
+- [x] Reescrever `app/main.mjs` para usar `pc.AppBase` + `pc.AppOptions`.
+- [x] Registrar explicitamente `pc.GSplatComponentSystem` e `pc.GSplatHandler`.
+- [x] Usar `createGraphicsDevice()` (assíncrono) antes de criar `AppBase`.
+- [x] Substituir `app.assets.loadFromUrl` por `Asset` + `app.assets.load` (padrão atual).
+- [x] Adicionar câmera de órbita (`camera-controls.mjs`) para facilitar inspeção do splat.
+- [x] Adicionar `importmap` em `app/index.html` para resolver o bare specifier `'playcanvas'`.
+- [x] Verificar passo a passo:
+  ```bash
+  npx --yes serve . -p 8080
+  # abrir: http://localhost:8080/app/?splat=http://localhost:8080/tools/bridge-server/sample.ply
+  # esperado: splat visível no canvas, UI de overlay exibindo "Splat carregado"
+  ```
+
+**Commit**: d851842
+
+---
+
+### Fase 9 — Ferramenta de cone no SuperSplat (sem modificar fonte)
+
+- [x] Criar `tools/cone-selector/inject.mjs` com:
+  - Painel flutuante com campos: apex, axis, angle, range, op.
+  - Predicado de cone exato aplicado em `splatData.getProp('x/y/z/state')`.
+  - Suporte a `splat.updateState()` com fallback para `stateTexture` lock/unlock.
+  - Botão "Selecionar" → aplica cone e destaca gaussianas na UI do SuperSplat.
+  - Botão "Limpar" → remove seleção atual.
+  - Botão "Enviar ao Bridge" → serializa PLY binário e POST `/process-mask`.
+- [x] Criar `tools/cone-selector/bookmarklet.js` com código do bookmarklet.
+- [x] Testar:
+  ```
+  http://localhost:3000/?load=http://localhost:8080/tools/bridge-server/sample.ply
+  # Abrir DevTools → Console → injetar script:
+  const s=document.createElement('script');s.type='module';
+  s.src='http://localhost:8080/tools/cone-selector/inject.mjs';
+  document.head.appendChild(s);
+  # Esperado: painel "Cone Selector" aparece no canto superior direito
+  ```
+
+**Commit**: ac0b45b
+
+---
+
+### Fase 10 — Página wrapper integrada
+
+- [x] Criar `tools/cone-selector/index.html` com:
+  - Layout de duas colunas: sidebar de controle + iframe com SuperSplat.
+  - Campo para URL do SuperSplat e URL do splat a carregar (`?load=`).
+  - Todos os controles de cone (apex, axis, angle, range, op) no sidebar.
+  - Botões Selecionar / Limpar / Enviar ao Bridge.
+  - Lógica de acesso a `iframe.contentWindow.scene` (mesmo quando same-origin).
+  - Fallback: botão "Injetar Cone Selector" para injeção via DOM do iframe.
+  - Campo configurável para Bridge URL.
+- [x] Testar em `http://localhost:8080/tools/cone-selector/` com SuperSplat em `http://localhost:3000`.
+
+**Commit**: ver próximo
+
+---
+
+### Fase 11 — Wrapper same-origin para remover injeção manual
+
+**Rollback anchor antes da fase**: `bf2f49b216efe7c845308121d1e788af17b9c74d`
+
+- [x] Validar que o build do SuperSplat em `supersplat/dist/` responde corretamente quando servido pela mesma origem em `http://localhost:8080/supersplat/dist/`.
+- [x] Alterar `tools/cone-selector/index.html` para usar `http://localhost:8080/supersplat/dist/` como URL padrão do iframe e do campo `URL SuperSplat`.
+- [x] Reabilitar injeção automática do `inject.mjs` quando o iframe estiver same-origin, mantendo fallback claro para URLs cross-origin.
+- [x] Testar no navegador: `Abrir com splat` + `Injetar Cone Selector` sem DevTools quando o iframe estiver em `8080/supersplat/dist/`.
+
+**Commit**: 7348648
+
+---
+
+### Fase 12 — Camada unificada de entrada (Gamepad + VR/XR)
+
+> Objetivo: evitar lógica duplicada entre desktop e headset criando uma
+> abstração única de ponteiro/raycast para seleção por cone, reaproveitando o
+> suporte nativo de gamepad já existente na engine PlayCanvas.
+
+> **Viabilidade**: alta e de baixa a média complexidade. A engine já expõe
+> `AppOptions.gamepads`, `pc.GamePads` e o mapeamento de eixos `padrx/padry`
+> no controller interno, então o trabalho do produto fica concentrado em:
+> inicializar `gamepads` no app, transformar a alavanca direita em cursor/aim
+> virtual e mapear botões para `set/add/remove` sem depender de eventos de mouse.
+
+- [x] Criar módulo `app/scripts/input-pointer.mjs` (ou equivalente em `tools/cone-selector/`) com contrato único de entrada:
+  - `getPose()` -> `{ origin, direction, sourceType }`
+  - `getVirtualCursorDelta()` -> `{ x, y }`
+  - `isSelectPressed()` -> boolean
+  - `didSelectRelease()` -> boolean
+  - `getOperation()` -> `'set' | 'add' | 'remove'`
+  - `sourceType` em `{ gamepad, xr-left, xr-right, hmd, keyboard-fallback }`
+- [x] Implementar backend Desktop por gamepad:
+  - [x] Inicializar `createOptions.gamepads = new pc.GamePads()` em `app/main.mjs`.
+  - [x] Reusar o suporte de eixos da engine para ler a alavanca direita (`PAD_R_STICK_X/Y` ou `padrx/padry`).
+  - [x] Converter a alavanca direita em cursor virtual/ray de tela com deadzone, sensibilidade e clamp.
+  - [x] Mapear botão 1 para modo `add` e botão 2 para modo `remove`.
+  - [x] Definir comportamento padrão sem botão modificador: `set`.
+- [x] Implementar backend XR:
+  - [x] Priorizar controlador dominante quando ambos estiverem ativos.
+  - [x] Fallback para câmera HMD quando não houver controlador com pose válida.
+  - [x] Reusar `inputSource.gamepad` quando disponível para manter o mesmo mapeamento lógico de botões/eixos fora do desktop.
+  - [x] Mapear botão 1 para `add` e botão 2 para `remove` também no XR, preservando trigger/select como ação primária quando o perfil não expuser layout padrão.
+- [x] Integrar a camada unificada ao seletor atual:
+  - [x] Substituir leituras diretas de `this.app.xr` e `keyboard` por chamadas ao adaptador.
+  - [x] Preservar comportamento atual de seleção incremental/chunks.
+  - [x] Manter compatibilidade com o fluxo atual do bridge.
+- [x] Definir política de prioridade de entrada (estado global):
+  - [x] Se sessão XR ativa e controlador válido -> usar XR.
+  - [x] Se sessão XR ativa sem controlador mas com `inputSource.gamepad` válido -> usar o layout XR gamepad.
+  - [x] Fora de XR com gamepad conectado -> usar cursor virtual por alavanca direita.
+  - [x] Sem gamepad -> manter apenas fallback de teclado/câmera para debug.
+
+#### Critérios de aceite da Fase 12
+
+- [x] Sem duplicação da lógica de seleção (fonte única).
+- [x] Cursor virtual responde à alavanca direita sem depender de eventos capturados pelo SuperSplat.
+- [x] Pendências de validação transferidas para a Fase 17 (Backlog Futuro).
+
+---
+
+### Fase 13 — Interação por gamepad no desktop e no modo VR/XR (UX + testes)
+
+> Objetivo: entregar experiência utilizável em desktop e em headset, com
+> feedback visual consistente e testes de regressão, sem depender de mouse no
+> canvas do SuperSplat.
+
+- [x] Desktop (gamepad na tela):
+  - [x] Alavanca direita move cursor/retículo virtual no canvas.
+  - [x] Botão primário confirma `set`; botão 1 ativa `add`; botão 2 ativa `remove`.
+  - [x] Overlay de parâmetros em tempo real (`angle`, `range`, `selectedCount`, `mode`, `sourceType`).
+  - [x] Ajuste de `coneRange` por eixo secundário ou bumpers, com deadzone e repetição controlada.
+- [x] VR/XR:
+  - [x] Ray visual do controlador com cor por modo (`set/add/remove`).
+  - [x] Botão 1 = `add`, botão 2 = `remove`, usando o `gamepad` do `XRInputSource` quando disponível.
+  - [x] Haptics curtos ao confirmar seleção (quando suportado).
+- [x] Wrapper `tools/cone-selector/index.html`:
+  - [x] Botão explícito de modo de entrada: `Auto | Gamepad | XR`.
+  - [x] Indicador de fonte ativa (`gamepad`, `xr-left`, `xr-right`, `hmd`).
+- [x] Testes automatizados:
+  - [x] `test:input-pointer` (mock de gamepad/xr e transição de estados).
+  - [x] `test:virtual-cursor` (deadzone, clamp e mapeamento da alavanca direita).
+  - [x] `test:cone-projection` (consistência do raio entre gamepad desktop e XR).
+  - [x] `test:bridge-opacity-flow` (pipeline `SELECT -> MASK(-V opacity_raw,gt,T) -> EXPORT`).
+- [x] Testes manuais (checklist):
+  - [x] Desktop com gamepad: selecionar, limpar e enviar ao bridge.
+  - [x] Pendências de validação transferidas para a Fase 17 (Backlog Futuro).
+
+#### Critérios de aceite da Fase 13
+
+- [x] Pendências de aceite transferidas para a Fase 17 (Backlog Futuro).
+
+---
+
+### Fase 14 — Rendering XR/VR no Cone Selector (Wrapper + Inject)
+
+> Objetivo: incorporar inicialização/encerramento de sessão XR diretamente no
+> fluxo do `tools/cone-selector/`, mantendo o SuperSplat sem alteração de fonte
+> e seguindo o padrão sugerido em `vrxr_input.md` (start por interação de UI,
+> verificação de disponibilidade e câmera válida).
+
+- [x] `tools/cone-selector/inject.mjs`:
+  - [x] Expor RPC `xrStatus` para consultar `supported`, `availableVr` e `active`.
+  - [x] Expor RPC `xrStart` com `{ type: 'immersive-vr', space: 'local-floor' }`.
+  - [x] Expor RPC `xrEnd` e `xrToggle` para controle de ciclo da sessão.
+  - [x] Resolver câmera de forma robusta (`scene.camera`, `cameraEntity` ou `root.findComponents('camera')`).
+  - [x] Retornar erros claros quando WebXR não estiver disponível.
+- [x] `tools/cone-selector/index.html`:
+  - [x] Adicionar botões de UI: `Entrar em XR (VR)`, `Sair do XR`, `Alternar XR`.
+  - [x] Adicionar atalho de teclado `V` para alternar sessão XR.
+  - [x] Adicionar indicador de fonte ativa no sidebar (`auto | gamepad | xr`).
+  - [x] Sincronizar status XR periodicamente via `postMessage` RPC.
+
+#### Critérios de aceite da Fase 14
+
+- [x] Pendências de aceite transferidas para a Fase 17 (Backlog Futuro).
+
+---
+
+### Fase 15 — Build custom do SuperSplat com XR habilitado
+
+> Objetivo: remover o bloqueio estrutural de XR no runtime do SuperSplat usado
+> no iframe do wrapper, mantendo o injector atual e habilitando a sessão VR no
+> próprio `window.scene.app`.
+
+- [x] Alterar `supersplat/src/main.ts` para criar `GraphicsDevice` com `xrCompatible: true`.
+- [x] Alterar `supersplat/src/pc-app.ts` para habilitar `appOptions.xr = XrManager`.
+- [x] Rebuildar distribuição do SuperSplat:
+  ```bash
+  cd supersplat
+  npm run build
+  ```
+- [x] Manter compatibilidade com o injector atual (`tools/cone-selector/inject.mjs`) sem remover fallback.
+
+#### Critérios de aceite da Fase 15
+
+- [x] `window.scene.app.xr` disponível no build custom do SuperSplat.
+- [x] Fluxo fallback para app standalone permanece funcional quando XR não estiver disponível no navegador/dispositivo.
+- [x] Pendência de validação transferida para a Fase 17 (Backlog Futuro).
+
+---
+
+### Fase 16 — Estabilização XR (Grid, Pipeline e Input)
+
+> Objetivo: consolidar a experiência XR para que a mesma cena do SuperSplat
+> seja renderizada no headset com controles equivalentes ao gamepad desktop,
+> reduzindo discrepâncias entre runtime desktop e VR.
+
+- [x] Corrigir pipeline XR para evitar black screen após transição desktop → XR.
+  - Ajuste no render path para manter passes necessários de splat/composição durante XR.
+- [x] Manter render contínuo durante sessão XR para acompanhar pose de cabeça/controlador.
+- [ ] Corrigir renderização do grid no XR com estereoscopia correta entre os olhos.
+  - Problema atual: grid aparece com estéreo incorreto/desalinhado no headset, apesar de seguir a câmera.
+  - Status: patch aplicado no código para usar câmera efetiva por olho no hook de render (`supersplat/src/scene.ts`, `supersplat/src/infinite-grid.ts`) e fallback de usabilidade com grid desativado automaticamente durante sessão XR (`tools/cone-selector/inject.mjs`); pendente validação manual em headset.
+- [x] Restabelecer funcionamento base dos controles XR em runtime (botões/eixos/navegação).
+  - Status validado em headset: XR voltou a funcionar após ajuste de locomoção movendo o rig (pai da câmera) no `tools/cone-selector/inject.mjs`.
+- [ ] Ajustar responsividade final dos controles XR (latência/intermitência/paridade entre perfis).
+  - Status atual: funcionamento base recuperado; pendente ajuste fino por perfil de headset/controlador.
+- [x] Ajustar mapeamento de botões/eixos XR para ficar mais próximo do comportamento de gamepad.
+- [x] Habilitar `xrCompatible` + `XrManager` também no app standalone (`app/`) para botão VR.
+- [x] Mitigar cache stale via Service Worker no fluxo local (`nosw=1` e unregister em localhost).
+
+#### Validação técnica — rotação visual do splat apenas em memória
+
+- [x] Viabilidade confirmada na documentação/código do SuperSplat: a rotação visual pode ser aplicada na entidade do splat sem editar os arrays originais `x/y/z`.
+  - Evidência: `Splat.move(position, rotation, scale)` atua em `entity.setLocalRotation(...)` e atualiza bounds/world transform (`supersplat/src/splat.ts`).
+  - Evidência: export usa matriz de transformação em cache durante serialização (`supersplat/src/splat-serialize.ts`), permitindo controle explícito de quando aplicar/reverter transformação.
+- [x] Implementar modo "rotação de visualização" no wrapper/inject (somente runtime em memória) com chaveamento por botão do controle esquerdo. No modo de "rotação de visualização" é aplicada uma rotação nos planos X e Z de acordo com a entrada da alavanca esquerda, caso contrário a alavanca esquerda é utiliza para a funcionalidade de navegação. Mostrar na UI o modo corrente!
+- [x] Salvar snapshot de transformação local do splat antes da rotação de preview.
+- [x] Reverter transformação para snapshot original imediatamente antes de exportar (`scene.write` / bridge) para preservar coordenadas originais. use um dos botões do controle esquerdo disponíveis (não os triggers) para fazer a exportação.
+- [x] Reaplicar rotação de preview após export (opcional), mantendo UX sem persistir rotação em arquivo.
+
+#### Critérios de aceite da Fase 16
+
+- [x] Entrar em XR não apaga a cena imediatamente após o primeiro frame.
+- [ ] Grid do SuperSplat renderiza corretamente em XR com estéreo consistente entre os olhos.
+- [x] Controles XR voltam a funcionar em runtime (botões/eixos/navegação) nos perfis testados manualmente.
+- [ ] Controles XR reproduzem integralmente as ações esperadas de gamepad em todos os perfis de headset/controlador.
+- [ ] Controles XR respondem com baixa latência e sem intermitência perceptível (trigger/botões/eixos).
+- [ ] Botão VR do app standalone entra em sessão XR em ambiente WebXR válido sem ações extras.
+
+---
+
+## Pausa Técnica — Estado Atual
+
+### Resumo do que já foi feito
+
+- Wrapper de cone com controle de sessão XR (`xrStart`, `xrEnd`, `xrToggle`) via `postMessage`.
+- Build custom do SuperSplat com suporte XR habilitado.
+- Correções de render XR (pipeline, render contínuo e ajuste parcial do grid no XR).
+- Correções de input unificado (gamepad + XR) e feedback visual do cone.
+- Rotação visual do splat em memória funcionando no `rotation mode`, com snapshot/reversão antes do export e reaplicação após export.
+- Fluxo local com bypass de Service Worker para evitar bundle antigo durante iteração.
+
+### Problemas ainda em aberto
+
+- Grid do SuperSplat no XR ainda apresenta estereoscopia incorreta (desalinhamento entre os olhos).
+- Comportamento de controles XR ainda pode variar por perfil de headset/controlador.
+- Responsividade/paridade dos controles XR ainda requer ajuste fino por perfil de headset/controlador.
+- Botão VR no app standalone pode depender de condições de runtime (OpenXR/SteamVR/browser/gesto do usuário) mesmo com código ajustado.
+
+### Próximos passos recomendados
+
+1. Diagnosticar e corrigir o grid em XR com foco em estereoscopia (matrizes por olho, origem de câmera ativa e ordem de passes).
+2. Ajustar responsividade final dos controles XR (debounce, deadzone e latência) e fechar paridade com gamepad.
+3. Implementar rotação de visualização em memória (entity transform), com snapshot/reversão obrigatória antes do export.
+4. Rodar matriz de testes por headset/controlador (Quest Link, Index, WMR) com log de mapeamento de botões/eixos para validar funcionamento + responsividade.
+5. Validar entrada em VR no app standalone em ambiente WebXR real (permissão, gesto de usuário, runtime OpenXR/SteamVR) e registrar critérios de aceite.
+6. Adicionar telemetria de suporte para fechar a Fase 16 (`sourceType`, `buttons`, `axes`, `xr.active`, `xr.type`, `xr.spaceType`, tempo entre evento e ação).
+
+---
+
+### Fase 17 — Backlog Futuro (pendências movidas até a Fase 15)
+
+- [x] (Origem: Fase 12) Validar predicado de cone idêntico entre gamepad desktop e XR (sem divergência geométrica).
+- [x] (Origem: Fase 12) Validar troca entre gamepad desktop e XR sem recarregar a página.
+- [x] (Origem: Fase 13) Implementar zona morta e debounce para evitar spam de seleção por trigger/alavanca instáveis.
+- [x] (Origem: Fase 13) Exibir mensagem clara quando sessão XR não possuir input source ou layout de gamepad utilizável.
+- [ ] (Origem: Fase 13) Expor comando `serializeFull` na UI do wrapper com `selectedOpacityRaw`, `unselectedOpacityRaw`, `opacityThresholdRaw`.
+- [x] (Origem: Fase 13) Executar testes manuais XR: 1 controlador, 2 controladores (dominante), queda de controlador com fallback HMD/câmera.
+- [ ] (Origem: Fase 13) Fechar critérios de aceite: saída válida no bridge em desktop+XR, sem regressão no modo legado e README atualizado para gamepad/XR.
+- [ ] (Origem: Fase 14) Validar início de XR via botão sem DevTools em navegador compatível com headset.
+- [x] (Origem: Fase 14) Validar encerramento de XR sem recarregar iframe nem perder estado da UI.
+- [x] (Origem: Fase 14) Garantir mensagem de erro clara quando XR estiver indisponível no wrapper.
+- [ ] (Origem: Fase 15) Validar fluxo `xrStart` no wrapper com headset conectado e permissão concedida.
+
+---
+
+## Guia Rápido — Como entrar em VR/XR pela interface
+
+### Pré-requisitos
+
+- Headset conectado e reconhecido pelo runtime WebXR.
+- SteamVR ativo (quando aplicável) e runtime OpenXR configurado.
+- Página servida em `localhost` (ou HTTPS) para permissões WebXR.
+
+### Fluxo pelo wrapper (`tools/cone-selector/`)
+
+1. Abrir: `http://localhost:8080/tools/cone-selector/`
+2. Confirmar URL do SuperSplat no campo lateral (preferencialmente com `?nosw=1`).
+3. Clicar em **Abrir com splat**.
+4. Clicar em **Injetar Cone Selector** (se ainda não estiver ativo).
+5. Definir modo em **XR** e clicar em **Entrar em XR (VR)**.
+6. Para sair, usar **Sair do XR** (ou **Alternar XR** / tecla `V`).
+
+### Fluxo pelo app standalone (`app/`)
+
+1. Abrir: `http://localhost:8080/app/?splat=http://localhost:8080/tools/bridge-server/sample.ply`
+2. Clicar em **Entrar em VR**.
+3. Se não iniciar, validar disponibilidade no runtime WebXR (browser + OpenXR/SteamVR + permissões).
+
+---
+
+## Referências
+
+- Engine GSplat API: https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/
+- Script system: https://developer.playcanvas.com/user-manual/scripting/
+- Exemplo shader-effects: `engine/examples/src/examples/gaussian-splatting/shader-effects.example.mjs`
+- Multi-splat vertex shader: `engine/examples/src/examples/gaussian-splatting/multi-splat.shader.glsl.vert`
+- Engine gamepad input: `engine/src/platform/input/game-pads.js`, `engine/src/platform/input/controller.js`
+- XR controllers script: `engine/scripts/esm/xr-controllers.mjs`
+- PlayCanvas Editor: https://github.com/playcanvas/editor
+- SuperSplat `window.scene` API (inferida do código): `supersplat/src/scene.ts`, `supersplat/src/splat.ts`
+- `pc.AppBase` exemplo oficial: `engine/examples/src/examples/gaussian-splatting/simple.example.mjs`

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3GS Mask Studio — Engine App</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "playcanvas": "../engine/build/playcanvas.mjs"
+    }
+  }
+  </script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #overlay {
+      position: fixed; top: 10px; left: 10px;
+      color: #fff; font-family: monospace; font-size: 12px;
+      background: rgba(0,0,0,0.5); padding: 8px 12px; border-radius: 6px;
+      pointer-events: none;
+    }
+    #reticle {
+      position: fixed;
+      width: 16px;
+      height: 16px;
+      border: 2px solid #43d67a;
+      border-radius: 50%;
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.35);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      display: none;
+      z-index: 10;
+    }
+    #enter-vr {
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+      padding: 10px 24px; font-size: 16px; cursor: pointer;
+      background: #1a73e8; color: #fff; border: none; border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="application-canvas"></canvas>
+  <div id="overlay">
+    <div>3GS Mask Studio</div>
+    <div id="status">Carregando...</div>
+    <div id="selected-count">Selecionados: 0</div>
+    <div id="input-source">Fonte: -</div>
+    <div id="input-op">Modo: -</div>
+    <div id="cone-debug">Cone: -</div>
+  </div>
+  <div id="reticle" aria-hidden="true"></div>
+  <button id="enter-vr">Entrar em VR</button>
+
+  <script type="module" src="main.mjs"></script>
+</body>
+</html>

@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3GS Cone Selector — Wrapper</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a12; font-family: monospace; font-size: 12px; color: #e0e0e0; }
+
+    #layout {
+      display: flex;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    #sidebar {
+      width: 240px;
+      flex-shrink: 0;
+      background: rgba(15,15,25,0.97);
+      border-right: 1px solid rgba(100,180,255,0.2);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      z-index: 10;
+    }
+
+    #sidebar header {
+      padding: 12px 14px 8px;
+      font-size: 13px;
+      font-weight: bold;
+      color: #7dd3fc;
+      border-bottom: 1px solid rgba(100,180,255,0.15);
+    }
+
+    .section {
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+
+    label {
+      display: block;
+      color: #94a3b8;
+      margin-bottom: 3px;
+      font-size: 11px;
+    }
+
+    input[type="text"], select {
+      width: 100%;
+      background: #0a0a18;
+      color: #e0e0e0;
+      border: 1px solid #334;
+      border-radius: 3px;
+      padding: 4px 6px;
+      font-family: monospace;
+      font-size: 11px;
+      margin-bottom: 6px;
+    }
+
+    input[type="range"] { width: 100%; margin: 3px 0 6px; cursor: pointer; }
+
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 6px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: monospace;
+      font-size: 11px;
+      margin-bottom: 5px;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-blue   { background: #1d4ed8; color: #fff; }
+    .btn-green  { background: #059669; color: #fff; }
+    .btn-gray   { background: #374151; color: #fff; }
+    .btn-red    { background: #991b1b; color: #fff; }
+
+    #status {
+      font-size: 10px;
+      color: #94a3b8;
+      min-height: 32px;
+      padding: 8px 14px;
+      word-break: break-all;
+      border-top: 1px solid rgba(255,255,255,0.05);
+    }
+
+    #splat-url-bar {
+      display: flex;
+      gap: 4px;
+      padding: 6px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    #splat-url-bar input {
+      flex: 1;
+      margin: 0;
+    }
+    #splat-url-bar button {
+      flex-shrink: 0;
+      padding: 4px 8px;
+      background: #1e3a5f;
+      color: #7dd3fc;
+      border: 1px solid #334;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+
+    #frame-wrap {
+      flex: 1;
+      position: relative;
+    }
+
+    #supersplat-frame {
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+
+    #inject-btn-overlay {
+      position: absolute;
+      bottom: 12px;
+      right: 12px;
+      padding: 6px 12px;
+      background: rgba(29,78,216,0.85);
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-family: monospace;
+      font-size: 11px;
+      z-index: 20;
+    }
+  </style>
+</head>
+<body>
+<div id="layout">
+  <!-- Painel lateral de controle -->
+  <div id="sidebar">
+    <header>🔵 Cone Selector</header>
+
+    <!-- URL do SuperSplat + carregamento de splat -->
+    <div class="section">
+      <label>URL SuperSplat</label>
+      <div id="splat-url-bar">
+        <input id="supersplat-url" type="text" value="" placeholder="(auto) /supersplat/dist/?nosw=1" />
+        <button onclick="loadSuperSplat()">▶</button>
+      </div>
+      <label>Splat URL (para carregar via ?load=)</label>
+      <input id="splat-url" type="text"
+        value=""
+        placeholder="http://...sample.ply" />
+      <button class="btn btn-gray" onclick="openWithSplat()">Abrir com splat</button>
+    </div>
+
+    <!-- Parâmetros do cone -->
+    <div class="section">
+      <label>Ápice (x y z)</label>
+      <input id="cs-apex" type="text" value="0 0 3" />
+      <button class="btn btn-gray" id="auto-apex-btn" onclick="autoApex()">
+        Auto (centro do splat)
+      </button>
+      <label>Eixo (x y z)</label>
+      <input id="cs-axis" type="text" value="0 0 -1" />
+      <label>Ângulo: <span id="angle-val">30</span>°</label>
+      <input id="cs-angle" type="range" min="1" max="90" value="30"
+        oninput="document.getElementById('angle-val').textContent=this.value" />
+      <label>Range: <span id="range-val">5.0</span> m</label>
+      <input id="cs-range" type="range" min="0.1" max="20" step="0.1" value="5"
+        oninput="document.getElementById('range-val').textContent=parseFloat(this.value).toFixed(1)" />
+      <label>Operação</label>
+      <select id="cs-op">
+        <option value="add">Add</option>
+        <option value="set">Set</option>
+        <option value="remove">Remove</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+        <input id="cs-preview" type="checkbox" checked />
+        Mostrar cone (preview)
+      </label>
+    </div>
+
+    <!-- Ações -->
+    <div class="section">
+      <label>Modo de entrada</label>
+      <select id="input-mode">
+        <option value="auto" selected>Auto</option>
+        <option value="gamepad">Gamepad</option>
+        <option value="xr">XR</option>
+      </select>
+      <label>Fonte ativa</label>
+      <input id="active-source" type="text" value="desconhecida" readonly />
+      <label>XR</label>
+      <button class="btn btn-blue" onclick="startXr()">Entrar em XR (VR)</button>
+      <button class="btn btn-red" onclick="endXr()">Sair do XR</button>
+      <button class="btn btn-gray" onclick="toggleXr()">Alternar XR (tecla V)</button>
+      <button class="btn btn-gray" onclick="openStandaloneXrApp()">Abrir app XR standalone</button>
+    </div>
+
+    <div class="section">
+      <button class="btn btn-blue" onclick="doSelect()">Selecionar</button>
+      <button class="btn btn-gray" onclick="doClear()">Limpar seleção</button>
+      <button class="btn btn-green" onclick="doSend()">Enviar ao Bridge</button>
+    </div>
+
+    <!-- Bridge URL -->
+    <div class="section">
+      <label>Bridge URL</label>
+      <input id="bridge-url" type="text" value="http://localhost:3001/process-mask" />
+    </div>
+
+    <!-- Status -->
+    <div id="status">Pronto.</div>
+  </div>
+
+  <!-- Área do iframe SuperSplat -->
+  <div id="frame-wrap">
+    <iframe id="supersplat-frame" src=""
+      allow="xr-spatial-tracking; camera; microphone"
+      sandbox="allow-scripts allow-same-origin allow-forms allow-popups">
+    </iframe>
+    <button id="inject-btn-overlay" onclick="injectScript()">
+      Injetar Cone Selector
+    </button>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// postMessage RPC — única forma segura de falar com iframe cross-origin
+// ---------------------------------------------------------------------------
+let _msgId = 0;
+const _pending = new Map(); // id → { resolve, reject, timer }
+
+window.addEventListener('message', (event) => {
+    const d = event.data;
+    if (!d || d.ns !== 'coneSelectorReply') return;
+    const p = _pending.get(d.id);
+    if (!p) return;
+    clearTimeout(p.timer);
+    _pending.delete(d.id);
+    if (d.error) p.reject(new Error(d.error));
+    else p.resolve(d);
+});
+
+function sendCmd(cmd, payload = {}, timeoutMs = 8000) {
+    return new Promise((resolve, reject) => {
+        const id = ++_msgId;
+        const frame = document.getElementById('supersplat-frame');
+        const timer = setTimeout(() => {
+            _pending.delete(id);
+            reject(new Error(`Timeout aguardando resposta de "${cmd}". Injete o Cone Selector primeiro.`));
+        }, timeoutMs);
+        _pending.set(id, { resolve, reject, timer });
+        frame.contentWindow.postMessage({ ns: 'coneSelector', cmd, payload, id }, '*');
+    });
+}
+
+function setStatus(msg) {
+    document.getElementById('status').textContent = msg;
+    console.log('[wrapper]', msg);
+}
+
+function setActiveSource(label) {
+  const el = document.getElementById('active-source');
+  if (el) el.value = label;
+}
+
+function getCurrentSplatUrl() {
+  return document.getElementById('splat-url')?.value?.trim() || '';
+}
+
+function openStandaloneXrApp() {
+  const splat = getCurrentSplatUrl();
+  const appUrl = new URL(`${window.location.origin}/app/`);
+  if (splat) appUrl.searchParams.set('splat', splat);
+  window.open(appUrl.toString(), '_blank', 'noopener,noreferrer');
+  setStatus('Abrindo app standalone com suporte XR em nova aba...');
+}
+
+function getFrameDocument() {
+  const frame = document.getElementById('supersplat-frame');
+  try {
+    return frame.contentWindow?.document ?? null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Carregar SuperSplat no iframe
+// ---------------------------------------------------------------------------
+function loadSuperSplat() {
+  const raw = document.getElementById('supersplat-url').value.trim();
+  const url = normalizeSupersplatUrl(raw || `${window.location.origin}/supersplat/dist/`);
+  const u = new URL(url);
+  u.searchParams.set('nosw', '1');
+  const finalUrl = u.toString();
+  document.getElementById('supersplat-frame').src = finalUrl;
+  setStatus(`Carregando: ${finalUrl}`);
+}
+
+function normalizeSupersplatUrl(rawUrl) {
+  const fallback = `${window.location.origin}/supersplat/dist/`;
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return fallback;
+
+  try {
+    const u = new URL(trimmed, window.location.origin);
+
+    if (u.pathname.endsWith('/index.html')) {
+      u.pathname = u.pathname.slice(0, -'index.html'.length);
+    }
+
+    if (!u.pathname.endsWith('/')) {
+      const lastSegment = u.pathname.split('/').pop() || '';
+      if (!lastSegment.includes('.')) {
+        u.pathname += '/';
+      }
+    }
+
+    return u.toString();
+  } catch (_e) {
+    return fallback;
+  }
+}
+
+function openWithSplat() {
+  const base = normalizeSupersplatUrl(document.getElementById('supersplat-url').value);
+    const splat = document.getElementById('splat-url').value.trim();
+  const u = new URL(base);
+  const filename = splat.split('/').pop() || 'sample.ply';
+
+  u.searchParams.set('nosw', '1');
+  u.searchParams.delete('load');
+  u.searchParams.delete('filename');
+  u.searchParams.append('load', splat);
+  u.searchParams.append('filename', filename);
+
+  const finalUrl = u.toString();
+  document.getElementById('supersplat-frame').src = finalUrl;
+    setStatus(`Abrindo SuperSplat com splat: ${splat}`);
+}
+
+// ---------------------------------------------------------------------------
+// Injetar inject.mjs no iframe — via bookmarklet URI (funciona cross-origin
+// porque é iniciado pelo próprio iframe context ao navegar para o blob URL)
+// Estratégia: criar blob URL com o código do bookmarklet e navegar no iframe
+// ---------------------------------------------------------------------------
+function injectScript() {
+    // postMessage ping para ver se já está injetado
+    sendCmd('ping', {}, 1500)
+        .then(() => setStatus('Cone Selector já está ativo no iframe.'))
+        .catch(() => {
+      const src = `${window.location.origin}/tools/cone-selector/inject.mjs`;
+      const doc = getFrameDocument();
+
+      if (doc) {
+        const existing = doc.getElementById('cone-selector-module');
+        if (existing) {
+          setStatus('Cone Selector já foi solicitado para o iframe. Aguarde a carga.');
+          return;
+        }
+
+        const script = doc.createElement('script');
+        script.id = 'cone-selector-module';
+        script.type = 'module';
+        script.src = `${src}?t=${Date.now()}`;
+        script.onload = () => {
+          setStatus('Cone Selector injetado automaticamente no iframe.');
+          setTimeout(pushPreviewToIframe, 150);
+        };
+        script.onerror = () => setStatus('Falha ao carregar inject.mjs no iframe.');
+        doc.head.appendChild(script);
+        setStatus('Injetando Cone Selector no iframe...');
+        return;
+      }
+
+      setStatus(
+        `Injeção automática indisponível: o iframe está em outra origem.\n` +
+        `Use um URL same-origin como ${window.location.origin}/supersplat/dist/ ou injete manualmente no DevTools.`
+      );
+        });
+}
+
+function getParams() {
+    const apex = document.getElementById('cs-apex').value.trim().split(/\s+/).map(Number);
+    const axis = document.getElementById('cs-axis').value.trim().split(/\s+/).map(Number);
+    const angleDeg = parseFloat(document.getElementById('cs-angle').value);
+    const range    = parseFloat(document.getElementById('cs-range').value);
+    const op       = document.getElementById('cs-op').value;
+    return { apex, axis, angleDeg, range, op };
+}
+
+async function pushPreviewToIframe() {
+  const enabled = document.getElementById('cs-preview').checked;
+  const { apex, axis, angleDeg, range } = getParams();
+  try {
+    await sendCmd('preview', { apex, axis, angleDeg, range, enabled }, 1200);
+  } catch (_e) {
+    // Sem erro visual aqui: o preview só funciona após inject.mjs estar ativo.
+  }
+}
+
+function getInputModeLabel() {
+  const mode = document.getElementById('input-mode')?.value || 'auto';
+  if (mode === 'xr') return 'xr';
+  if (mode === 'gamepad') return 'gamepad';
+  return 'auto';
+}
+
+async function refreshXrStatus(silent = true) {
+  try {
+    const r = await sendCmd('xrStatus', {}, 1200);
+    const mode = getInputModeLabel();
+    if (mode === 'xr') {
+      setActiveSource(r.active ? `xr:${r.type || 'immersive-vr'}` : 'xr:inativo');
+    } else if (mode === 'gamepad') {
+      setActiveSource('gamepad');
+    } else {
+      setActiveSource(r.active ? `xr:${r.type || 'immersive-vr'}` : 'auto');
+    }
+
+    if (!silent && !r.active) {
+      setStatus(`XR pronto: supported=${r.supported} availableVr=${r.availableVr}`);
+    }
+    return r;
+  } catch (_e) {
+    if (!silent) setStatus('XR status indisponível (inject.mjs não ativo ou cross-origin).');
+    const mode = getInputModeLabel();
+    setActiveSource(mode === 'xr' ? 'xr:indisponível' : mode);
+    return null;
+  }
+}
+
+async function startXr() {
+  setStatus('Iniciando sessão XR...');
+  try {
+    const r = await sendCmd('xrStart', { type: 'immersive-vr', space: 'local-floor' }, 10000);
+    setActiveSource(`xr:${r.type || 'immersive-vr'}`);
+    setStatus('Sessão XR iniciada com sucesso.');
+  } catch (e) {
+        const msg = String(e?.message || e);
+        if (msg.includes('XR manager não disponível')) {
+          setStatus('Falha ao iniciar XR: este build do SuperSplat não expõe XrManager. Use "Abrir app XR standalone" para VR.');
+        } else {
+          setStatus(`Falha ao iniciar XR: ${msg}`);
+        }
+  }
+}
+
+async function endXr() {
+  try {
+    await sendCmd('xrEnd', {}, 4000);
+    setActiveSource(getInputModeLabel() === 'xr' ? 'xr:inativo' : getInputModeLabel());
+    setStatus('Sessão XR encerrada.');
+  } catch (e) {
+    setStatus(`Falha ao encerrar XR: ${e.message}`);
+  }
+}
+
+async function toggleXr() {
+  try {
+    const r = await sendCmd('xrToggle', { type: 'immersive-vr', space: 'local-floor' }, 10000);
+    const isActive = Boolean(r.active);
+    setActiveSource(isActive ? `xr:${r.type || 'immersive-vr'}` : 'xr:inativo');
+    setStatus(isActive ? 'XR ativado.' : 'XR desativado.');
+  } catch (e) {
+    setStatus(`Falha no toggle XR: ${e.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ações via postMessage RPC
+// ---------------------------------------------------------------------------
+async function doSelect() {
+    setStatus('Selecionando...');
+    try {
+        const r = await sendCmd('select', getParams());
+        setStatus(`✓ ${r.inside}/${r.total} gaussianas (${getParams().op})`);
+    } catch (e) { setStatus(`Erro: ${e.message}`); }
+}
+
+async function doClear() {
+    setStatus('Limpando...');
+    try {
+        await sendCmd('clear');
+        setStatus('Seleção limpa.');
+    } catch (e) { setStatus(`Erro: ${e.message}`); }
+}
+
+async function doSend() {
+    setStatus('Serializando...');
+    try {
+        // 1. Serializar no contexto do iframe (onde os dados estão)
+        const r = await sendCmd('serialize', {}, 15000);
+        setStatus(`Enviando ${r.count} gaussianas ao Bridge...`);
+
+        // 2. Enviar ao bridge a partir desta origem (sem restrição cross-origin)
+        const bridgeUrl = document.getElementById('bridge-url').value.trim();
+    const resp = await fetch(bridgeUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'x-input-filename': 'selected.ply'
+      },
+      body: r.buffer
+    });
+        const json = await resp.json();
+        setStatus(json.ok ? `Bridge OK — ${json.outputBytes} bytes` : `Bridge erro: ${json.error ?? JSON.stringify(json)}`);
+    } catch (e) { setStatus(`Erro: ${e.message}`); }
+}
+
+async function autoApex() {
+    try {
+        const r = await sendCmd('autoApex');
+        document.getElementById('cs-apex').value = r.apex.map(v => parseFloat(v).toFixed(3)).join(' ');
+        setStatus(`Ápice automático: ${r.apex.map(v => parseFloat(v).toFixed(3)).join(', ')}`);
+    pushPreviewToIframe();
+    } catch (e) { setStatus(`Erro: ${e.message}`); }
+}
+
+// Atualização interativa do cone ao editar parâmetros na UI
+document.getElementById('cs-apex').addEventListener('change', pushPreviewToIframe);
+document.getElementById('cs-axis').addEventListener('change', pushPreviewToIframe);
+document.getElementById('cs-angle').addEventListener('input', pushPreviewToIframe);
+document.getElementById('cs-range').addEventListener('input', pushPreviewToIframe);
+document.getElementById('cs-preview').addEventListener('change', pushPreviewToIframe);
+document.getElementById('input-mode').addEventListener('change', () => {
+  refreshXrStatus(true);
+});
+
+window.addEventListener('keydown', (evt) => {
+  if (evt.key?.toLowerCase() !== 'v') return;
+  const targetTag = evt.target?.tagName?.toLowerCase();
+  if (targetTag === 'input' || targetTag === 'textarea' || targetTag === 'select') return;
+  toggleXr();
+});
+
+// Quando o iframe recarrega, tenta reaplicar preview automaticamente
+document.getElementById('supersplat-frame').addEventListener('load', () => {
+  setTimeout(() => {
+    pushPreviewToIframe();
+    refreshXrStatus(true);
+  }, 400);
+});
+
+setInterval(() => {
+  refreshXrStatus(true);
+}, 1500);
+
+(() => {
+  const supersplatInput = document.getElementById('supersplat-url');
+  const splatInput = document.getElementById('splat-url');
+  const defaultSupersplat = `${window.location.origin}/supersplat/dist/?nosw=1`;
+  const defaultSplat = `${window.location.origin}/tools/bridge-server/sample.ply`;
+
+  if (supersplatInput && !supersplatInput.value.trim()) {
+    supersplatInput.value = defaultSupersplat;
+  }
+  if (splatInput && !splatInput.value.trim()) {
+    splatInput.value = defaultSplat;
+  }
+
+  // Carrega automaticamente o Supersplat com no-service-worker em ambiente local.
+  loadSuperSplat();
+})();
+
+refreshXrStatus(true);
+</script>
+</body>
+</html>

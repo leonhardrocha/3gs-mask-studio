@@ -7,3 +7,6 @@
 [submodule "splat-transform"]
 	path = splat-transform
 	url = https://github.com/playcanvas/splat-transform.git
+[submodule "editor"]
+	path = editor
+	url = https://github.com/playcanvas/editor.git
