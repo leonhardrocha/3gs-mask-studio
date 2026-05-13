@@ -10,3 +10,6 @@
 [submodule "editor"]
 	path = editor
 	url = https://github.com/playcanvas/editor.git
+[submodule "OPFpp"]
+	path = OPFpp
+	url = https://github.com/leonhardrocha/OPFpp.git

@@ -14,6 +14,7 @@
 import * as pc from '../engine/build/playcanvas.mjs';
 import CameraControls from '../engine/scripts/esm/camera-controls.mjs';
 import { VrMaskerScript, BRIDGE_DEFAULT_URL } from './scripts/vr-masker.mjs';
+import { initVRPlugin } from './scripts/vr-studio-plugin.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers de UI
@@ -82,6 +83,7 @@ app.on('destroy', () => window.removeEventListener('resize', resize));
 // ---------------------------------------------------------------------------
 pc.registerScript(CameraControls, 'cameraControls');
 pc.registerScript(VrMaskerScript, 'vrMasker');
+initVRPlugin(app);
 
 const cameraEntity = new pc.Entity('Camera');
 cameraEntity.addComponent('camera', {
@@ -150,6 +152,20 @@ lightEntity.setEulerAngles(45, 30, 0);
 app.root.addChild(lightEntity);
 
 // ---------------------------------------------------------------------------
+// VR Studio Plugin — camera rig + XR session management + Alt+V hotkey
+// ---------------------------------------------------------------------------
+const pluginManager = new pc.Entity('VRPluginManager');
+pluginManager.addComponent('script');
+pluginManager.script.create('vrStudio', {
+    properties: {
+        speed:      3.5,
+        coneAngle:  45,
+        coneRange:  5
+    }
+});
+app.root.addChild(pluginManager);
+
+// ---------------------------------------------------------------------------
 // Carregar splat via query string ?splat=<url>
 // ---------------------------------------------------------------------------
 const params = new URLSearchParams(window.location.search);
@@ -214,21 +230,27 @@ if (app.xr && app.xr.supported) {
     });
 
     enterVrBtn.addEventListener('click', () => {
+        const plugin = pluginManager?.script?.vrStudio;
         if (!app.xr.active) {
-            if (!app.xr.isAvailable(pc.XRTYPE_VR)) {
-                setStatus('VR indisponível: verifique headset conectado e runtime OpenXR ativo (SteamVR).');
-                updateVrButton();
-                return;
-            }
-
-            app.xr.start(cameraEntity.camera, pc.XRTYPE_VR, xrLocalFloor, {
-                callback: (err) => {
-                    if (err) {
-                        setStatus(`Erro XR: ${err.message}`);
-                    }
+            if (plugin) {
+                // Delega ao plugin (usa o rig correto + API pública).
+                plugin.startSession().catch((err) => {
+                    setStatus(`Erro XR: ${err.message}`);
                     updateVrButton();
+                });
+            } else {
+                if (!app.xr.isAvailable(pc.XRTYPE_VR)) {
+                    setStatus('VR indisponível: verifique headset conectado e runtime OpenXR ativo (SteamVR).');
+                    updateVrButton();
+                    return;
                 }
-            });
+                app.xr.start(cameraEntity.camera, pc.XRTYPE_VR, xrLocalFloor, {
+                    callback: (err) => {
+                        if (err) setStatus(`Erro XR: ${err.message}`);
+                        updateVrButton();
+                    }
+                });
+            }
         } else {
             app.xr.end();
         }
