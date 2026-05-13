@@ -235,6 +235,54 @@ Isso preserva o comportamento da ferramenta existente, mas com lifecycle nativo 
 
 ---
 
+## Como o cone e desenhado no OpenGL (preview)
+
+O preview visual do cone nao e desenhado pelo HTML do painel. Ele e desenhado no ciclo de render da cena.
+
+Pipeline tecnico:
+
+1. O estado do preview fica em `previewState` (apex, axis, angleDeg, range, enabled).
+2. `updatePreview()` aplica mudancas da UI/XR e garante o hook de render via `installPreviewHook()`.
+3. `installPreviewHook()` registra `app.on('prerender', drawPreviewCone)` uma unica vez.
+4. `drawPreviewCone()` roda a cada frame e chama `app.drawLineArrays(...)` no `gizmoLayer`.
+5. O painel HTML serve para entrada de parametros e status, mas nao controla sozinho o ciclo de desenho.
+
+### Porque o cone podia persistir apos fechar o painel
+
+Fechar apenas o DOM (`panel.remove()`) nao removia automaticamente o hook `prerender` nem parava o loop de input. Com isso, `drawPreviewCone()` continuava rodando por frame e o cone seguia visivel.
+
+### Teardown aplicado
+
+Foi adicionado teardown explicito para desligar o preview quando o painel/plugin e removido:
+
+- remove listener de render: `app.off('prerender', drawPreviewCone)`
+- reseta flag de hook instalado
+- desliga preview (`previewState.enabled = false`)
+- para loop de gamepad (`gpLoopRunning = false`)
+- forca redraw para limpar o overlay visual
+
+Esse teardown agora e usado em:
+
+- clique no botao fechar do painel (`#cone-close`)
+- `destroy()` do plugin fallback
+- `destroy()` do plugin `vrStudio`
+- toggle OFF do botao `#right-toolbar-vr-plugin` (via chamada global de teardown)
+
+### Nota de escopo (atualizado)
+
+A causa principal da inversão visual no desenho do cone foi o uso de conversões de preview-space (`toPreviewRenderPoint` / `toPreviewRenderAxis`) no caminho de renderização.  
+O estado de preview já estava em coordenadas corretas para desenho e seleção; ao aplicar conversão adicional, o overlay podia aparecer invertido no eixo Y em alguns cenários.
+
+**Estado atual do código:**
+- `drawPreviewCone()` usa apex e axis diretamente de `previewState`.
+- `applySelectionFromPreview()` usa apex e axis diretamente de `previewState`.
+- O teardown do preview permanece obrigatório para remover o hook de prerender e parar loops ativos ao fechar painel/toggle OFF.
+
+**Observação:**
+- As funções auxiliares antigas de conversão ainda podem existir no arquivo por compatibilidade/histórico, mas não devem ser usadas no caminho ativo de desenho/seleção.
+
+---
+
 ## Observacoes importantes
 
 - O plugin depende de `window.scene.app.xr` estar disponivel no build em execucao.
