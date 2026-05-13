@@ -490,6 +490,9 @@ function getDefaultApex() {
 function injectPanel() {
     if (document.getElementById('cone-selector-panel')) {
         console.log('[cone-selector] painel já injetado');
+        // Se o painel já existe (ex.: reinjeção), ainda assim tente bootstrap
+        // do plugin novamente para evitar corrida de inicialização.
+        tryBootstrapVrPlugin();
         return;
     }
 
@@ -514,6 +517,9 @@ function injectPanel() {
         </div>
         <div id="gp-indicator" style="font-size:10px;color:#6b7280;margin-bottom:6px;">
             🎮 desconectado
+        </div>
+        <div id="cs-vr-status" style="font-size:10px;color:#22d3ee;margin-bottom:6px;display:none;">
+            🕶️ VR: ativo
         </div>
         <label>Ápice (x y z)</label><br>
         <input id="cs-apex" type="text" value="${defaultApex.join(' ')}"
@@ -634,6 +640,10 @@ function injectPanel() {
 
     // Inicia loop de polling do gamepad (idempotente)
     startGamepadLoop();
+
+    // Bootstrap do VrStudioPlugin (usa window.pc do SuperSplat).
+    // Tenta até 10x com intervalo de 500 ms caso o app ainda não esteja pronto.
+    tryBootstrapVrPlugin();
 
     console.log('[cone-selector] painel injetado com sucesso');
 }
@@ -1309,6 +1319,24 @@ function startGamepadLoop() {
 
         // XR controller path (preferred while XR session is active)
         if (xrSource) {
+            // Se VrStudioPlugin estiver ativo, ele lida com os controladores via
+            // update(dt) nativo do PlayCanvas. O RAF loop apenas atualiza o indicador.
+            const vrScriptPlugin = app?.root?.findByName?.('VRPluginManager')?.script?.vrStudio;
+            const vrFallbackPlugin = window.__vrStudioPlugin?.mode === 'fallback-functional'
+                ? window.__vrStudioPlugin
+                : null;
+            if (vrScriptPlugin || vrFallbackPlugin) {
+                if (indicator) {
+                    indicator.style.color = '#22d3ee';
+                    const pair = (xrSources?.left && xrSources?.right) ? 'L+R'
+                        : (xrSources?.right ? 'R' : (xrSources?.left ? 'L' : '1x'));
+                    const modeLabel = vrFallbackPlugin ? 'plugin fallback' : 'plugin ativo';
+                    indicator.textContent = `XR ${pair} [${modeLabel}]`;
+                }
+                gpPrevButtons = [];
+                requestAnimationFrame(loop);
+                return;
+            }
             const pose = getXrPose(xrSource);
             const gpXr = xrSource.gamepad || null;
             let dirty = false;
@@ -1633,6 +1661,422 @@ function endXrSession() {
     resetXrVisualLocomotion();
     if (window.scene) window.scene.forceRender = true;
     return getXrStatus();
+}
+
+// ---------------------------------------------------------------------------
+// Plugin VR Studio — pc.createScript no contexto do SuperSplat (inject)
+// ---------------------------------------------------------------------------
+
+/**
+ * Registra e inicializa o VrStudioPlugin usando window.pc (exposto pelo SuperSplat).
+ * O plugin usa o update(dt) nativo do PlayCanvas para leitura de controladores XR,
+ * eliminando o branch XR do RAF loop manual.
+ *
+ * Eventos disparados pelo plugin (ouvidos abaixo):
+ *   app.fire('xr:pose',    { origin, direction })  — pose do controlador direito
+ *   app.fire('xr:trigger', { pressed })            — trigger (rising/falling edge)
+ *   app.fire('xr:clear')                           — botão B / botão 4
+ *   app.fire('xr:cycle-op')                        — botão X / botão 5
+ *   app.fire('xr:navigate', { dx, dz })            — locomoção (controlador esquerdo)
+ */
+function bootstrapVrPlugin() {
+    const app = window.scene?.app;
+    if (!app) {
+        console.log('[inject][vr-plugin] aguardando scene/app...');
+        return false;
+    }
+    if (app.root.findByName('VRPluginManager')) {
+        console.log('[inject][vr-plugin] VRPluginManager já existe.');
+        return true; // já inicializado
+    }
+
+    const pc = window.pc;
+
+    // SuperSplat ESM pode não expor `window.pc`. Nesse caso, criamos um
+    // fallback funcional com ciclo de update via app.on('update').
+    if (!pc?.createScript) {
+        const EntityCtor = app.root?.constructor;
+        if (typeof EntityCtor !== 'function') {
+            console.warn('[inject][vr-plugin] app disponível, mas não foi possível obter Entity ctor.');
+            return false;
+        }
+
+        const pluginManager = new EntityCtor('VRPluginManager');
+        pluginManager.__vrPluginMode = 'fallback-functional';
+        app.root.addChild(pluginManager);
+
+        const fallbackPlugin = {
+            mode: 'fallback-functional',
+            managerName: 'VRPluginManager',
+            createdAt: Date.now(),
+            speed: 3.5,
+            _xrTriggerWasPressed: false,
+            _xrClearWasPressed: false,
+            _xrCycleWasPressed: false,
+            _updateHandler: null,
+            _xrStartHandler: null,
+            _xrEndHandler: null,
+            _keyHandler: null,
+            _injectToolbarButton() {
+                if (document.getElementById('btn-vr-studio')) return;
+                const toolbar = document.getElementById('bottom-toolbar');
+                if (!toolbar) return;
+                const btn = document.createElement('button');
+                btn.id = 'btn-vr-studio';
+                btn.className = 'bottom-toolbar-button';
+                btn.title = 'Entrar em VR (Alt+V)';
+                btn.textContent = '🕶️';
+                btn.addEventListener('click', () => this.toggleVR());
+                toolbar.appendChild(btn);
+            },
+            _updateToolbarButton(active) {
+                const btn = document.getElementById('btn-vr-studio');
+                if (!btn) return;
+                btn.classList.toggle('bottom-toolbar-toggle', active);
+            },
+            _setVrStatusVisible(visible) {
+                const el = document.getElementById('cs-vr-status');
+                if (!el) return;
+                el.style.display = visible ? 'block' : 'none';
+                if (visible) el.textContent = '🕶️ VR: ativo (fallback)';
+            },
+            _readXrButton(source, index) {
+                if (typeof source?.getButton === 'function') {
+                    const v = source.getButton(index);
+                    if (typeof v === 'boolean') return v;
+                    if (typeof v === 'number') return v > 0.5;
+                }
+                const gp = source?.inputSource?.gamepad ?? source?.gamepad;
+                const btn = gp?.buttons?.[index];
+                if (!btn) return false;
+                if (typeof btn === 'object') return btn.pressed ?? (Number(btn.value ?? 0) > 0.5);
+                return Number(btn) > 0.5;
+            },
+            _getXrPose(source) {
+                if (typeof source?.getOrigin === 'function' && typeof source?.getDirection === 'function') {
+                    const o = source.getOrigin();
+                    const d = source.getDirection();
+                    if (o && d) {
+                        return {
+                            origin: [o.x, o.y, o.z],
+                            direction: norm([d.x, d.y, d.z])
+                        };
+                    }
+                }
+                return null;
+            },
+            update(dt) {
+                const xr = app.xr;
+                if (!xr?.active) return;
+
+                const sources = getXrSources();
+                const aimSource = sources?.right || sources?.primary || null;
+                const navSource = pickXrNavSource(sources, aimSource);
+
+                if (aimSource) {
+                    const pose = this._getXrPose(aimSource);
+                    if (pose) {
+                        previewState.apex = pose.origin;
+                        previewState.axis = pose.direction;
+                        previewState.poseSpace = 'render';
+                        updatePanelFromPreview();
+                        installPreviewHook();
+                        if (window.scene) window.scene.forceRender = true;
+                    }
+
+                    const trigger = this._readXrButton(aimSource, 0) || Boolean(aimSource.selecting);
+                    if (trigger && !this._xrTriggerWasPressed) {
+                        applySelectionFromPreview();
+                    }
+                    this._xrTriggerWasPressed = trigger;
+
+                    const clear = this._readXrButton(aimSource, 1) || this._readXrButton(aimSource, 4);
+                    if (clear && !this._xrClearWasPressed) {
+                        document.getElementById('cs-clear')?.click();
+                    }
+                    this._xrClearWasPressed = clear;
+
+                    const cycle = this._readXrButton(aimSource, 2) || this._readXrButton(aimSource, 5);
+                    if (cycle && !this._xrCycleWasPressed) {
+                        cycleOperationMode();
+                    }
+                    this._xrCycleWasPressed = cycle;
+                }
+
+                if (navSource) {
+                    const navResolved = readXrNavAxes(navSource, aimSource);
+                    const [sx, sy] = navResolved.axes;
+                    if (Math.abs(sx) > 0.001 || Math.abs(sy) > 0.001) {
+                        moveObserverByLeftStick(sx, sy, dt);
+                    }
+                }
+            },
+            startSession(type, space) {
+                return startXrSession({ type: type ?? 'immersive-vr', space: space ?? 'local-floor' });
+            },
+            endSession() {
+                return endXrSession();
+            },
+            toggleVR() {
+                if (app.xr?.active) {
+                    this.endSession();
+                } else {
+                    this.startSession().catch((err) => {
+                        const el = document.getElementById('cs-status');
+                        if (el) el.textContent = `Erro XR: ${err.message}`;
+                    });
+                }
+            },
+            destroy() {
+                if (this._updateHandler) app.off('update', this._updateHandler);
+                if (this._xrStartHandler) app.xr?.off('start', this._xrStartHandler);
+                if (this._xrEndHandler) app.xr?.off('end', this._xrEndHandler);
+                if (this._keyHandler) window.removeEventListener('keydown', this._keyHandler);
+            }
+        };
+
+        fallbackPlugin._injectToolbarButton();
+
+        fallbackPlugin._updateHandler = (dt) => fallbackPlugin.update(dt);
+        app.on('update', fallbackPlugin._updateHandler);
+
+        if (app.xr) {
+            fallbackPlugin._xrStartHandler = () => {
+                fallbackPlugin._updateToolbarButton(true);
+                fallbackPlugin._setVrStatusVisible(true);
+            };
+            fallbackPlugin._xrEndHandler = () => {
+                fallbackPlugin._updateToolbarButton(false);
+                fallbackPlugin._setVrStatusVisible(false);
+            };
+            app.xr.on('start', fallbackPlugin._xrStartHandler);
+            app.xr.on('end', fallbackPlugin._xrEndHandler);
+        }
+
+        fallbackPlugin._keyHandler = (e) => {
+            if (!e.altKey) return;
+            if (e.key.toLowerCase() === 'v') {
+                e.preventDefault();
+                fallbackPlugin.toggleVR();
+            }
+        };
+        window.addEventListener('keydown', fallbackPlugin._keyHandler);
+
+        window.__vrStudioPlugin = fallbackPlugin;
+
+        console.warn('[inject][vr-plugin] window.pc ausente; fallback funcional ativo via app.on(update).');
+        return true;
+    }
+
+    // -------------------------------------------------------------------
+    // Definição do script
+    // -------------------------------------------------------------------
+    const VrStudio = pc.createScript('vrStudio');
+
+    VrStudio.attributes.add('speed',     { type: 'number', default: 2.0 });
+    VrStudio.attributes.add('coneAngle', { type: 'number', default: 30  });
+
+    VrStudio.prototype.initialize = function () {
+        this._xrTriggerWasPressed = false;
+        this._xrClearWasPressed   = false;
+        this._xrCycleWasPressed   = false;
+
+        if (app.xr) {
+            app.xr.on('start', () => {
+                this._updateToolbarButton(true);
+                this._setVrStatusVisible(true);
+            });
+            app.xr.on('end', () => {
+                this._updateToolbarButton(false);
+                this._setVrStatusVisible(false);
+            });
+        }
+
+        window.addEventListener('keydown', this._onKey = (e) => {
+            if (!e.altKey) return;
+            if (e.key.toLowerCase() === 'v') {
+                e.preventDefault();
+                this.toggleVR();
+            }
+        });
+
+        this._injectToolbarButton();
+        console.log('[VrStudioPlugin] Plug-in VR Studio carregado e pronto.');
+    };
+
+    VrStudio.prototype._injectToolbarButton = function () {
+        if (document.getElementById('btn-vr-studio')) return;
+        const toolbar = document.getElementById('bottom-toolbar');
+        if (!toolbar) return;
+        const btn = document.createElement('button');
+        btn.id          = 'btn-vr-studio';
+        btn.className   = 'bottom-toolbar-button';
+        btn.title       = 'Entrar em VR (Alt+V)';
+        btn.textContent = '🕶️';
+        btn.addEventListener('click', () => this.toggleVR());
+        toolbar.appendChild(btn);
+    };
+
+    VrStudio.prototype._updateToolbarButton = function (active) {
+        const btn = document.getElementById('btn-vr-studio');
+        if (!btn) return;
+        btn.classList.toggle('bottom-toolbar-toggle', active);
+    };
+
+    VrStudio.prototype._setVrStatusVisible = function (visible) {
+        const el = document.getElementById('cs-vr-status');
+        if (!el) return;
+        el.style.display = visible ? 'block' : 'none';
+        if (visible) el.textContent = '🕶️ VR: ativo';
+    };
+
+    VrStudio.prototype._readXrButton = function (source, index) {
+        if (typeof source.getButton === 'function') {
+            const v = source.getButton(index);
+            if (typeof v === 'boolean') return v;
+            if (typeof v === 'number')  return v > 0.5;
+        }
+        const gp  = source.inputSource?.gamepad ?? source.gamepad;
+        const btn = gp?.buttons?.[index];
+        if (!btn) return false;
+        if (typeof btn === 'object') return btn.pressed ?? (Number(btn.value ?? 0) > 0.5);
+        return Number(btn) > 0.5;
+    };
+
+    VrStudio.prototype._readNavAxes = function (source) {
+        const gp   = source.inputSource?.gamepad ?? source.gamepad;
+        const axes = gp?.axes || [];
+        const DZ   = 0.12;
+        const applyDz = (v) => Math.abs(v) < DZ ? 0 : (v - Math.sign(v) * DZ) / (1 - DZ);
+        const x23 = applyDz(axes[2] ?? 0), y23 = applyDz(axes[3] ?? 0);
+        const x01 = applyDz(axes[0] ?? 0), y01 = applyDz(axes[1] ?? 0);
+        return Math.hypot(x23, y23) >= Math.hypot(x01, y01) ? [x23, y23] : [x01, y01];
+    };
+
+    VrStudio.prototype._getXrPose = function (source) {
+        if (typeof source.getOrigin === 'function' && typeof source.getDirection === 'function') {
+            const o = source.getOrigin();
+            const d = source.getDirection();
+            if (o && d) return { origin: o, direction: d };
+        }
+        if (typeof source.getPosition === 'function' && typeof source.getRotation === 'function') {
+            const p = source.getPosition();
+            const r = source.getRotation();
+            if (p && r && pc.Quat) {
+                const q   = new pc.Quat(r.x, r.y, r.z, r.w);
+                const dir = new pc.Vec3(0, 0, -1);
+                q.transformVector(dir, dir);
+                return { origin: p, direction: dir };
+            }
+        }
+        return null;
+    };
+
+    VrStudio.prototype.update = function (dt) {
+        if (!app.xr?.active) return;
+
+        const sources = app.xr.input?.sources || [];
+
+        let aimSource = null, navSource = null;
+        for (const src of sources) {
+            const hand = String(src?.handedness || '').toLowerCase();
+            if (hand === 'right' && !aimSource)       { aimSource = src; }
+            else if (hand === 'left' && !navSource)   { navSource = src; }
+            else if (!aimSource)                      { aimSource = src; }
+        }
+        if (!navSource && sources.length >= 2) {
+            navSource = sources.find(s => s !== aimSource) ?? null;
+        }
+
+        // --- Controlador direito: mira + seleção ---
+        if (aimSource) {
+            const pose = this._getXrPose(aimSource);
+            if (pose) {
+                // Atualiza previewState e painel via closure (módulo inject.mjs).
+                previewState.apex      = [pose.origin.x,    pose.origin.y,    pose.origin.z];
+                previewState.axis      = [pose.direction.x, pose.direction.y, pose.direction.z];
+                previewState.poseSpace = 'render';
+                updatePanelFromPreview();
+                installPreviewHook();
+                if (window.scene) window.scene.forceRender = true;
+            }
+
+            const trigger = this._readXrButton(aimSource, 0) || Boolean(aimSource.selecting);
+            if (trigger && !this._xrTriggerWasPressed) {
+                applySelectionFromPreview();
+            }
+            this._xrTriggerWasPressed = trigger;
+
+            const clear = this._readXrButton(aimSource, 1) || this._readXrButton(aimSource, 4);
+            if (clear && !this._xrClearWasPressed) {
+                document.getElementById('cs-clear')?.click();
+            }
+            this._xrClearWasPressed = clear;
+
+            const cycle = this._readXrButton(aimSource, 2) || this._readXrButton(aimSource, 5);
+            if (cycle && !this._xrCycleWasPressed) {
+                cycleOperationMode();
+            }
+            this._xrCycleWasPressed = cycle;
+        }
+
+        // --- Controlador esquerdo: locomoção ---
+        if (navSource) {
+            const [stickX, stickY] = this._readNavAxes(navSource);
+            if (Math.abs(stickX) > 0.001 || Math.abs(stickY) > 0.001) {
+                moveObserverByLeftStick(stickX, stickY, dt); // inject.mjs function
+            }
+        }
+    };
+
+    VrStudio.prototype.startSession = function (type, space) {
+        // Delega para startXrSession() do inject.mjs (trata grid, locomotion, etc.)
+        return startXrSession({ type: type ?? 'immersive-vr', space: space ?? 'local-floor' });
+    };
+
+    VrStudio.prototype.endSession = function () {
+        return endXrSession(); // inject.mjs function
+    };
+
+    VrStudio.prototype.toggleVR = function () {
+        if (app.xr?.active) {
+            this.endSession();
+        } else {
+            this.startSession().catch((err) => {
+                const el = document.getElementById('cs-status');
+                if (el) el.textContent = `Erro XR: ${err.message}`;
+            });
+        }
+    };
+
+    VrStudio.prototype.destroy = function () {
+        if (this._onKey) {
+            window.removeEventListener('keydown', this._onKey);
+            this._onKey = null;
+        }
+        document.getElementById('btn-vr-studio')?.remove();
+    };
+
+    // -------------------------------------------------------------------
+    // Cria a entidade gerenciadora e ativa o script
+    // -------------------------------------------------------------------
+    const pluginManager = new pc.Entity('VRPluginManager');
+    pluginManager.addComponent('script');
+    app.root.addChild(pluginManager);
+    pluginManager.script.create('vrStudio', { attributes: { speed: 3.5, coneAngle: 45 } });
+
+    console.log('[inject] VRPluginManager criado em app.root');
+    return true;
+}
+
+function tryBootstrapVrPlugin(retries) {
+    retries = retries ?? 10;
+    if (bootstrapVrPlugin()) return;
+    if (retries > 0) {
+        setTimeout(() => tryBootstrapVrPlugin(retries - 1), 500);
+        return;
+    }
+    console.warn('[inject][vr-plugin] bootstrap expirou sem criar VRPluginManager.');
 }
 
 // ---------------------------------------------------------------------------
