@@ -1,0 +1,41 @@
+.lctgs-xr-container {
+    position: absolute;
+    left: 16px;
+    bottom: 48px;
+    display: flex;
+    gap: 8px;
+    z-index: 10;
+}
+
+.lctgs-xr-button {
+    border: 1px solid #7f8c8d;
+    background: rgba(30, 39, 46, 0.5);
+    color: #ecf0f1;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: default;
+    opacity: 0.4;
+    padding: 8px 12px;
+}
+
+.lctgs-xr-button.active {
+    cursor: pointer;
+    opacity: 1;
+}
+
+.lctgs-xr-button.active:hover {
+    background: rgba(30, 39, 46, 0.9);
+}
+
+.lctgs-message {
+    position: absolute;
+    left: 16px;
+    bottom: 12px;
+    color: #ecf0f1;
+    font-size: 12px;
+    background: rgba(0, 0, 0, 0.35);
+    border-radius: 4px;
+    padding: 6px 8px;
+    z-index: 10;
+}
