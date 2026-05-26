@@ -1,8 +1,7 @@
-// @config DESCRIPTION <span style="color:yellow"><b>Controls:</b> Right Mouse Button - paint | Left Mouse Button - orbit | Alt+L - toggle label viewer </span><br>3D painting on gaussian splats using GSplatProcessor.
 import { data } from 'examples/observer';
 import { deviceType, rootPath } from 'examples/utils';
-import * as pc from 'playcanvas';
 
+// @config DESCRIPTION <span style="color:yellow"><b>Controls:</b> Right Mouse Button - paint | Left Mouse Button - orbit | Alt+L - toggle label viewer </span><br>3D painting on gaussian splats using GSplatProcessor.
 // Shader options for GSplatProcessor - paints splats inside brush sphere
 const shaderOptions = {
     // GLSL process code - provides process() function with declarations
@@ -305,10 +304,8 @@ data.set('labelViewerEnabled', false);
 data.set('labelBlend', 0.8);
 data.set('labelColorMapMode', 'high-contrast');
 data.set('labelColorMapScheme', 'bright');
-data.set('showBiker1', true);
-data.set('showBiker2', true);
-data.set('showApartment', true);
-data.set('showSampleLabelOnly', true);
+data.set('assetVisibilityItems', []);
+data.set('newAssetUrl', '');
 
 const assets = {
     orbit: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` }),
@@ -332,6 +329,42 @@ assetListLoader.load(() => {
 
     // Store all paintable entities
     const paintables = [];
+
+    const visibilityPathByName = {};
+    const visibilityListenerPaths = new Set();
+
+    const syncAssetVisibility = () => {
+        for (const paintable of paintables) {
+            const path = visibilityPathByName[paintable.entity.name];
+            if (path) {
+                paintable.entity.enabled = !!data.get(path);
+            }
+        }
+    };
+
+    const registerVisibilityItem = (entityName, label) => {
+        if (visibilityPathByName[entityName]) {
+            return;
+        }
+
+        const safeName = entityName.replace(/\W/g, '_');
+        const path = `showAsset_${safeName}`;
+        visibilityPathByName[entityName] = path;
+
+        data.set(path, true);
+
+        const currentItems = data.get('assetVisibilityItems') ?? [];
+        data.set('assetVisibilityItems', currentItems.concat({
+            name: entityName,
+            label,
+            path
+        }));
+
+        if (!visibilityListenerPaths.has(path)) {
+            visibilityListenerPaths.add(path);
+            data.on(`${path}:set`, syncAssetVisibility);
+        }
+    };
 
     const applyLabelViewerParameters = (gsplatComponent, maxLabel = 1) => {
         gsplatComponent.setParameter('uLabelColoring', data.get('labelViewerEnabled') ? 1 : 0);
@@ -425,31 +458,22 @@ assetListLoader.load(() => {
 
     // Create paintable splats
     createPaintableSplat('biker1', assets.biker, [-1.9, -0.55, 0.6], [180, -90, 0], [0.3, 0.3, 0.3]);
+    registerVisibilityItem('biker1', 'Biker 1');
+
     createPaintableSplat('biker2', assets.biker, [-3, -0.5, -0.5], [180, 180, 0], [0.3, 0.3, 0.3]);
-    createPaintableSplat('apartment', assets.apartment, [0, -0.5, -3], [180, 0, 0], [0.5, 0.5, 0.5]);
-    createPaintableSplat('sample-label-only', assets.sampleLabelOnlyCompact, [1.2, -0.5, -1.3], [180, 0, 0], [0.4, 0.4, 0.4]);
+    registerVisibilityItem('biker2', 'Biker 2');
 
-    const visibilityPathByName = {
-        biker1: 'showBiker1',
-        biker2: 'showBiker2',
-        apartment: 'showApartment',
-        'sample-label-only': 'showSampleLabelOnly'
-    };
+    createPaintableSplat('apartment', assets.apartment, [1.0, -0.5, -3], [180, 0, 0], [0.5, 0.5, 0.5]);
+    registerVisibilityItem('apartment', 'Apartment');
 
-    const syncAssetVisibility = () => {
-        for (const paintable of paintables) {
-            const path = visibilityPathByName[paintable.entity.name];
-            if (path) {
-                paintable.entity.enabled = !!data.get(path);
-            }
-        }
-    };
+    createPaintableSplat('sample-label-only', assets.sampleLabelOnlyCompact, [-1.7, 0.7, -0.7], [180, 180, 180], [1.0, 1.0, 1.0]);
+    registerVisibilityItem('sample-label-only', 'Sample Label');
 
     syncAssetVisibility();
 
     // Camera positions
     const cameraPos = new pc.Vec3(-0.98, 0.28, -2.31);
-    const focusPos = new pc.Vec3(-1.10, 0.13, -1.56);
+    const focusPos = new pc.Vec3(-1.1, 0.13, -1.56);
 
     // Create camera with orbit camera script
     const camera = new pc.Entity('Camera');
@@ -514,10 +538,38 @@ assetListLoader.load(() => {
     data.on('toggleLabelViewer', () => {
         data.set('labelViewerEnabled', !data.get('labelViewerEnabled'));
     });
-    data.on('showBiker1:set', syncAssetVisibility);
-    data.on('showBiker2:set', syncAssetVisibility);
-    data.on('showApartment:set', syncAssetVisibility);
-    data.on('showSampleLabelOnly:set', syncAssetVisibility);
+
+    data.on('addAsset', (url) => {
+        const normalizedUrl = `${url ?? ''}`.trim();
+        if (!normalizedUrl) {
+            return;
+        }
+
+        // Construct full URL with base path
+        const fullUrl = `${rootPath}/static/assets/splats/${normalizedUrl}`;
+        console.log('Adding asset:', { normalizedUrl, rootPath, fullUrl });
+
+        const uniqueId = Date.now();
+        const entityName = `dynamic-asset-${uniqueId}`;
+        const asset = new pc.Asset(entityName, 'gsplat', { url: fullUrl });
+
+        app.assets.add(asset);
+
+        asset.once('ready', () => {
+            console.log('Asset loaded successfully:', entityName);
+            createPaintableSplat(entityName, asset, [0, -0.5, -1.5], [180, 0, 0], [0.35, 0.35, 0.35]);
+            registerVisibilityItem(entityName, asset.name);
+            syncAssetVisibility();
+            data.set('newAssetUrl', '');
+        });
+
+        asset.once('error', (err) => {
+            console.error('Asset loading failed:', { entityName, fullUrl, error: err });
+            app.assets.remove(asset);
+        });
+
+        app.assets.load(asset);
+    });
 
     const onKeyDown = (event) => {
         if (event.altKey && event.key.toLowerCase() === 'l') {

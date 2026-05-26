@@ -1,9 +1,47 @@
+// Add TypeScript declaration for JSX namespace
+// Ensure JSX runtime is configured correctly
+
 /**
  * @param {import('../../app/components/Example.mjs').ControlOptions} options - The options.
- * @returns {JSX.Element} The returned JSX Element.
+ * @returns {*} The returned controls tree.
  */
 export const controls = ({ observer, ReactPCUI, React, jsx, fragment }) => {
     const { BindingTwoWay, LabelGroup, ColorPicker, SelectInput, SliderInput, BooleanInput, Button, Panel } = ReactPCUI;
+
+    const AssetVisibilityPanel = () => {
+        const [items, setItems] = React.useState(observer.get('assetVisibilityItems') ?? []);
+
+        React.useEffect(() => {
+            const onItemsSet = () => {
+                setItems(observer.get('assetVisibilityItems') ?? []);
+            };
+
+            observer.on('assetVisibilityItems:set', onItemsSet);
+            onItemsSet();
+        }, []);
+
+        const visibilityRows = [];
+        for (const item of items) {
+            visibilityRows.push(jsx(
+                LabelGroup,
+                { text: item.label, key: item.path },
+                jsx(BooleanInput, {
+                    type: 'toggle',
+                    binding: new BindingTwoWay(),
+                    link: { observer, path: item.path }
+                })
+            ));
+        }
+        if (visibilityRows.length === 0) {
+            visibilityRows.push(jsx('div', { key: 'no-assets' }, 'No assets loaded'));
+        }
+
+        return jsx(
+            Panel,
+            { headerText: 'Asset Visibility' },
+            ...visibilityRows
+        );
+    };
 
     return fragment(
         jsx(
@@ -116,43 +154,19 @@ export const controls = ({ observer, ReactPCUI, React, jsx, fragment }) => {
                 }
             })
         ),
+        jsx(AssetVisibilityPanel, {}),
         jsx(
             Panel,
-            { headerText: 'Asset Visibility' },
-            jsx(
-                LabelGroup,
-                { text: 'Biker 1' },
-                jsx(BooleanInput, {
-                    type: 'toggle',
-                    binding: new BindingTwoWay(),
-                    link: { observer, path: 'showBiker1' }
-                })
-            ),
-            jsx(
-                LabelGroup,
-                { text: 'Biker 2' },
-                jsx(BooleanInput, {
-                    type: 'toggle',
-                    binding: new BindingTwoWay(),
-                    link: { observer, path: 'showBiker2' }
-                })
-            ),
-            jsx(
-                LabelGroup,
-                { text: 'Apartment' },
-                jsx(BooleanInput, {
-                    type: 'toggle',
-                    binding: new BindingTwoWay(),
-                    link: { observer, path: 'showApartment' }
-                })
-            ),
-            jsx(
-                LabelGroup,
-                { text: 'Sample Label' },
-                jsx(BooleanInput, {
-                    type: 'toggle',
-                    binding: new BindingTwoWay(),
-                    link: { observer, path: 'showSampleLabelOnly' }
+            { headerText: 'Dynamic Asset Management' },
+            jsx('div', {},
+                jsx('input', {
+                    type: 'text',
+                    placeholder: 'Asset URL',
+                    onChange: e => observer.set('newAssetUrl', e.target.value)
+                }),
+                jsx(Button, {
+                    text: 'Add',
+                    onClick: () => observer.emit('addAsset', observer.get('newAssetUrl'))
                 })
             )
         )

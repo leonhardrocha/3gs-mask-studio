@@ -213,8 +213,30 @@ assetListLoader.load(() => {
             deleteProcessor
         );
 
+        // Initialize splatLabel from gsplatData if available
+        const labelTex = gsplatComponent.getInstanceTexture('splatLabel');
+        if (labelTex) {
+            const rawLabels = gsplatComponent.resource?.gsplatData?.getProp?.('label');
+            const labelData = labelTex.lock();
+            let maxLabel = 1;
+            if (rawLabels?.length) {
+                const n = Math.min(rawLabels.length, labelTex.width * labelTex.height);
+                for (let i = 0; i < n; i++) {
+                    const v = Math.max(1, Math.floor(Number(rawLabels[i])));
+                    if (v > maxLabel) maxLabel = v;
+                    labelData[i] = v & 0xFF;
+                }
+            }
+            labelTex.unlock();
+            gsplatComponent.setParameter('uLabelColoring', 0);
+            gsplatComponent.setParameter('uLabelBlend', 0.8);
+            gsplatComponent.setParameter('uLabelMax', Math.max(1, maxLabel));
+            gsplatComponent.setParameter('uLabelSatBandSize', 16);
+        }
+
         // Set work buffer modifier
         gsplatComponent.setWorkBufferModifier(workBufferModifier);
+        gsplatComponent.workBufferUpdate = pc.WORKBUFFER_UPDATE_ALWAYS;
 
         return { selectionProcessor: selectionProc, deleteProcessor: deleteProc };
     };
@@ -230,11 +252,12 @@ assetListLoader.load(() => {
 
         const resource = /** @type {pc.GSplatResource} */ (asset.resource);
 
-        // Add splatVisible and splatSelection streams if not present
+        // Add splatVisible, splatSelection and splatLabel streams if not present
         if (!resource.format.getStream('splatVisible')) {
             resource.format.addExtraStreams([
                 { name: 'splatVisible', format: pc.PIXELFORMAT_R8, storage: pc.GSPLAT_STREAM_INSTANCE },
-                { name: 'splatSelection', format: pc.PIXELFORMAT_R8, storage: pc.GSPLAT_STREAM_INSTANCE }
+                { name: 'splatSelection', format: pc.PIXELFORMAT_R8, storage: pc.GSPLAT_STREAM_INSTANCE },
+                { name: 'splatLabel', format: pc.PIXELFORMAT_R8, storage: pc.GSPLAT_STREAM_INSTANCE }
             ]);
         }
 
@@ -264,10 +287,11 @@ assetListLoader.load(() => {
         // Use built-in default format for full visual preservation
         const format = pc.GSplatFormat.createDefaultFormat(device);
 
-        // Add visibility and selection streams (with instance storage)
+        // Add visibility, selection and label streams (with instance storage)
         format.addExtraStreams([
             { name: 'splatVisible', format: pc.PIXELFORMAT_R8, storage: pc.GSPLAT_STREAM_INSTANCE },
-            { name: 'splatSelection', format: pc.PIXELFORMAT_R8, storage: pc.GSPLAT_STREAM_INSTANCE }
+            { name: 'splatSelection', format: pc.PIXELFORMAT_R8, storage: pc.GSPLAT_STREAM_INSTANCE },
+            { name: 'splatLabel', format: pc.PIXELFORMAT_R8, storage: pc.GSPLAT_STREAM_INSTANCE }
         ]);
 
         const container = new pc.GSplatContainer(device, totalCount, format);
@@ -602,8 +626,23 @@ assetListLoader.load(() => {
         }
     });
 
+    // Toggle label coloring with Alt+L
+    let labelColoringEnabled = false;
+    const onKeyDown = (e) => {
+        if (e.altKey && e.key.toLowerCase() === 'l') {
+            e.preventDefault();
+            labelColoringEnabled = !labelColoringEnabled;
+            for (const editable of editables) {
+                editable.component.setParameter('uLabelColoring', labelColoringEnabled ? 1 : 0);
+            }
+            console.log(`[LabelColor] ${labelColoringEnabled ? 'ON' : 'OFF'}`);
+        }
+    };
+    window.addEventListener('keydown', onKeyDown);
+
     // Cleanup on destroy
     app.on('destroy', () => {
+        window.removeEventListener('keydown', onKeyDown);
         for (const editable of editables) {
             editable.selectionProcessor?.destroy();
             editable.deleteProcessor?.destroy();
