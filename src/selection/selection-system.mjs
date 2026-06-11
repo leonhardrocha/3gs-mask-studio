@@ -63,7 +63,7 @@ const selectionShader = {
 export const SELECT_ADDITIVE = 1;
 export const SELECT_SUBTRACTIVE = 0;
 
-export function createSelectionSystem({ app, device, data }) {
+export function createSelectionSystem({ app, device, data, history }) {
     /** @type {Array<{ entity, gsplatComponent, processor, maxLabel, numSplats }>} */
     const selectables = [];
 
@@ -152,6 +152,7 @@ export function createSelectionSystem({ app, device, data }) {
         ensureStream('editQuat', pc.PIXELFORMAT_RGBA32F);  // (x,y,z,w) rotation, default identity
         ensureStream('editTS', pc.PIXELFORMAT_RGBA32F);    // xyz translate, w uniform scale, default (0,0,0,1)
         ensureStream('editColor', pc.PIXELFORMAT_RGBA8);   // rgb + a = override flag
+        ensureStream('hidden', pc.PIXELFORMAT_R8);         // 255 = hidden (e.g. replaced by retexture)
         if (extraStreams.length > 0) resource.format.addExtraStreams(extraStreams);
 
         // Processor: reads default streams (to get center), writes selectionMask.
@@ -167,6 +168,12 @@ export function createSelectionSystem({ app, device, data }) {
         const maskData = maskTexture.lock();
         maskData.fill(0);
         maskTexture.unlock();
+
+        // Zero-initialize the hidden stream (0 = visible).
+        const hiddenTexture = gsplatComponent.getInstanceTexture('hidden');
+        const hiddenData = hiddenTexture.lock();
+        hiddenData.fill(0);
+        hiddenTexture.unlock();
 
         // Initialize edit streams to identity (no-op) so the modifier is a pass-through
         // until edits are committed.
@@ -217,10 +224,14 @@ export function createSelectionSystem({ app, device, data }) {
     };
 
     const processPending = () => {
+        // Selection scope: when an object is chosen, the brush sphere only marks
+        // that object, ignoring splats from others it happens to overlap.
+        const target = data.get('activeSelectionTarget') ?? 'all';
         while (pending.length > 0) {
             const { worldPoint, radius, mode } = pending.shift();
             for (const s of selectables) {
                 if (!s.entity.enabled) continue;
+                if (target !== 'all' && s.entity.name !== target) continue;
                 s.processor.setParameter('uBrushSphere', [worldPoint.x, worldPoint.y, worldPoint.z, radius]);
                 s.processor.setParameter('uSelMode', mode);
                 s.processor.setParameter('uModelMatrix', s.entity.getWorldTransform().data);
@@ -231,8 +242,50 @@ export function createSelectionSystem({ app, device, data }) {
         }
     };
 
+    // --- Mask snapshots (undo/redo) -----------------------------------------
+    const scopedSelectables = () => {
+        const target = data.get('activeSelectionTarget') ?? 'all';
+        return selectables.filter(s => s.entity.enabled && (target === 'all' || s.entity.name === target));
+    };
+
+    const snapshotMasks = async (objs) => {
+        const map = new Map();
+        for (const s of objs) {
+            const tex = s.gsplatComponent.getInstanceTexture('selectionMask');
+            if (!tex) continue;
+            const buf = await tex.read(0, 0, tex.width, tex.height);
+            map.set(s, Uint8Array.from(buf));
+        }
+        return map;
+    };
+
+    const uploadMasks = (map) => {
+        for (const [s, bytes] of map) {
+            const tex = s.gsplatComponent.getInstanceTexture('selectionMask');
+            if (!tex) continue;
+            const buf = tex.lock(); buf.set(bytes); tex.unlock();
+            if (s.entity?.gsplat) s.entity.gsplat.workBufferUpdate = pc.WORKBUFFER_UPDATE_ONCE;
+        }
+    };
+
+    const masksDiffer = (a, b) => {
+        for (const [s, bb] of a) {
+            const ab = b.get(s);
+            if (!ab || ab.length !== bb.length) return true;
+            for (let i = 0; i < bb.length; i++) if (ab[i] !== bb[i]) return true;
+        }
+        return false;
+    };
+
+    const pushMaskCommand = (label, before, after) => {
+        if (history && before.size) {
+            history.push({ label, undo: () => uploadMasks(before), redo: () => uploadMasks(after) });
+        }
+    };
+
     // --- Mask operations ----------------------------------------------------
-    const clear = () => {
+    const clear = async () => {
+        const before = history ? await snapshotMasks(selectables) : null;
         for (const s of selectables) {
             const tex = s.gsplatComponent.getInstanceTexture('selectionMask');
             if (!tex) continue;
@@ -241,20 +294,60 @@ export function createSelectionSystem({ app, device, data }) {
             tex.unlock();
             s.entity.gsplat.workBufferUpdate = pc.WORKBUFFER_UPDATE_ONCE;
         }
+        if (before) {
+            const after = new Map();
+            for (const [s, bytes] of before) after.set(s, new Uint8Array(bytes.length));
+            if (masksDiffer(before, after)) pushMaskCommand('limpar seleção', before, after);
+        }
     };
 
     const invert = async () => {
+        const before = new Map();
+        const after = new Map();
         for (const s of selectables) {
             const tex = s.gsplatComponent.getInstanceTexture('selectionMask');
             if (!tex) continue;
             const current = await tex.read(0, 0, tex.width, tex.height);
-            const buf = tex.lock();
-            for (let i = 0; i < buf.length; i++) {
-                buf[i] = current[i] > 127 ? 0 : 255;
-            }
-            tex.unlock();
+            const inv = new Uint8Array(current.length);
+            for (let i = 0; i < inv.length; i++) inv[i] = current[i] > 127 ? 0 : 255;
+            const buf = tex.lock(); buf.set(inv); tex.unlock();
             s.entity.gsplat.workBufferUpdate = pc.WORKBUFFER_UPDATE_ONCE;
+            if (history) { before.set(s, Uint8Array.from(current)); after.set(s, inv); }
         }
+        pushMaskCommand('inverter seleção', before, after);
+    };
+
+    // Hide the currently selected splats (mark the `hidden` stream). Used when a
+    // retextured mesh replaces the selected region.
+    const hideSelected = async () => {
+        for (const s of selectables) {
+            const maskTex = s.gsplatComponent.getInstanceTexture('selectionMask');
+            const hidTex = s.gsplatComponent.getInstanceTexture('hidden');
+            if (!maskTex || !hidTex) continue;
+            const mask = await maskTex.read(0, 0, maskTex.width, maskTex.height);
+            const buf = hidTex.lock();
+            let touched = false;
+            for (let i = 0; i < buf.length; i++) if (mask[i] > 127) { buf[i] = 255; touched = true; }
+            hidTex.unlock();
+            if (touched) s.entity.gsplat.workBufferUpdate = pc.WORKBUFFER_UPDATE_ONCE;
+        }
+    };
+
+    // --- Brush stroke boundaries (undo) -------------------------------------
+    // A stroke is one trigger/button press. We snapshot the scoped masks at the
+    // start and end, and push a single command for the whole stroke.
+    let strokeBefore = null;
+    const beginStroke = () => {
+        if (!history) return;
+        snapshotMasks(scopedSelectables()).then((m) => { strokeBefore = m; });
+    };
+    const endStroke = () => {
+        if (!history || !strokeBefore) return;
+        const before = strokeBefore;
+        strokeBefore = null;
+        snapshotMasks([...before.keys()]).then((after) => {
+            if (masksDiffer(before, after)) pushMaskCommand('seleção (pincel)', before, after);
+        });
     };
 
     // --- Parameter sync -----------------------------------------------------
@@ -279,8 +372,11 @@ export function createSelectionSystem({ app, device, data }) {
         syncAssetVisibility,
         queueSelect,
         processPending,
+        beginStroke,
+        endStroke,
         clear,
         invert,
+        hideSelected,
         updateHighlight,
         syncLabelViewer,
         destroy

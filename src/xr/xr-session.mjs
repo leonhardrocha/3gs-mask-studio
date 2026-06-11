@@ -13,8 +13,10 @@ import { SELECT_ADDITIVE, SELECT_SUBTRACTIVE } from '../selection/selection-syst
  * (green = additive, red = subtractive). This gives immediate feedback for where
  * you're selecting, the brush size, and the active mode.
  *
- * Optional surface snap (`data.xrSnapToSurface`, default off): a `pc.Picker`
- * depth probe along the ray; experimental in XR, so it's opt-in.
+ * Optional surface snap (`data.xrSnapToSurface`, default off): a CPU spatial
+ * index (`splat-index.mjs`) ray-marches the splat centers — no GPU readback, so
+ * no per-frame hitch. The lateral position stays 1:1 on the ray; only the depth
+ * is snapped and then smoothed (with jump gating) for a stable feel.
  *
  * Controls (grip reserved for phase-4 navigation):
  *   - trigger: select at the brush sphere (held = brush).
@@ -23,41 +25,58 @@ import { SELECT_ADDITIVE, SELECT_SUBTRACTIVE } from '../selection/selection-syst
  *   - A: toggle additive/subtractive (sphere color flips).
  *   - B: clear selection.
  */
-export function createXrSession({ app, camera, cameraParent, system, data, onSessionChange }) {
+export function createXrSession({ app, camera, cameraParent, system, data, splatIndex, controllerModels, panel, onSessionChange }) {
     const controllers = [];
     const locomotion = createLocomotion({ camera, cameraParent });
 
-    // Auxiliary camera + picker for OPTIONAL surface snap.
-    const pickCam = new pc.Entity('xr-pick-cam');
-    pickCam.addComponent('camera', { nearClip: 0.01, farClip: 200, fov: 30 });
-    pickCam.enabled = false;
-    app.root.addChild(pickCam);
-    const picker = new pc.Picker(app, 48, 48, true);
-    const worldLayer = app.scene.layers.getLayerByName('World');
-
-    const tmpTarget = new pc.Vec3();
     const brushCenter = new pc.Vec3();
-    const snappedCenter = new pc.Vec3();
-    let snapValid = false;
-    let lastSnap = 0;
     let prevA = false;
     let prevB = false;
+    let prevSelecting = false;
+    let navCooldownV = 0, navCooldownH = 0; // discrete-step gating for panel nav
 
-    const snap = (origin, dir) => {
-        pickCam.setPosition(origin);
-        tmpTarget.copy(dir).add(origin);
-        pickCam.lookAt(tmpTarget);
-        picker.prepare(pickCam.camera, app.scene, [worldLayer]);
-        return picker.getWorldPointAsync(picker.width >> 1, picker.height >> 1);
+    // Surface-snap depth smoothing (Fase 1.5): lateral stays 1:1 on the ray; only
+    // the DEPTH glides toward the snapped surface, and a large jump must persist a
+    // few frames before being accepted (avoids foreground/background flicker).
+    const SNAP_TAU = 0.05;       // s — depth smoothing time constant
+    const SNAP_MAX_JUMP = 0.4;   // m — depth jumps beyond this are gated
+    const SNAP_GATE_FRAMES = 3;
+    const SNAP_MAX_DIST = 30;    // m — ray-march cap
+    let smoothDepth = null;
+    let gateTarget = null, gateCount = 0;
+    let prevRaw = -1;
+    const snapStats = { hits: 0, total: 0, jitter: 0 };
+
+    const updateSmoothedDepth = (rawT, fallback, dt) => {
+        snapStats.total++;
+        if (rawT > 0) {
+            snapStats.hits++;
+            if (prevRaw > 0) snapStats.jitter = Math.abs(rawT - prevRaw);
+            prevRaw = rawT;
+        }
+        let target = rawT > 0 ? rawT : (smoothDepth ?? fallback); // dropout: hold last depth
+        if (smoothDepth == null) { smoothDepth = target; return smoothDepth; }
+        if (Math.abs(target - smoothDepth) > SNAP_MAX_JUMP) {
+            if (gateTarget != null && Math.abs(target - gateTarget) < SNAP_MAX_JUMP) gateCount++;
+            else { gateTarget = target; gateCount = 1; }
+            if (gateCount < SNAP_GATE_FRAMES) target = smoothDepth; // ignore until sustained
+            else { gateTarget = null; gateCount = 0; }
+        } else { gateTarget = null; gateCount = 0; }
+        const alpha = 1 - Math.exp(-dt / Math.max(1e-4, SNAP_TAU));
+        smoothDepth += (target - smoothDepth) * alpha;
+        return smoothDepth;
     };
+    const resetSnap = () => { smoothDepth = null; prevRaw = -1; gateTarget = null; gateCount = 0; };
 
     if (app.xr?.supported) {
         app.xr.input.on('add', (inputSource) => {
             const entity = createControllerEntity({ cameraParent, inputSource });
             controllers.push(entity);
+            controllerModels?.attach(inputSource, entity);
             inputSource.on('remove', () => {
                 const idx = controllers.indexOf(entity);
                 if (idx >= 0) controllers.splice(idx, 1);
+                controllerModels?.remove(inputSource);
                 entity.destroy();
             });
         });
@@ -87,63 +106,94 @@ export function createXrSession({ app, camera, cameraParent, system, data, onSes
         updateControllers({ app, controllers, rayVisible: data.get('xrRayVisible') !== false, rayLength: rayDist });
         if (!app.xr?.active) return;
 
+        // Animate the Input-Profiles models (button/trigger/grip/thumbstick feedback).
+        controllerModels?.update();
+
         const right = getPreferredInputSource(controllers, pc.XRHAND_RIGHT);
         const left = getPreferredInputSource(controllers, pc.XRHAND_LEFT);
+        const rpad = right?.gamepad;
+        const lpad = left?.gamepad;
 
-        // Locomotion: left stick = move, right stick X = snap turn.
+        // A (right button 4): open/close the mode panel (rising edge).
+        const aPressed = !!(rpad && rpad.buttons.length > 4 && rpad.buttons[4].pressed);
+        if (aPressed && !prevA) panel?.toggle();
+        prevA = aPressed;
+
+        // --- Panel OPEN: joystick navigation, locomotion + brush suspended ----
+        if (panel?.isOpen) {
+            navCooldownV -= dt; navCooldownH -= dt;
+            if (lpad && lpad.axes.length > 3) {
+                const lx = lpad.axes[2] ?? 0, ly = lpad.axes[3] ?? 0;
+                // Vertical: discrete focus steps.
+                if (Math.abs(ly) > 0.6) { if (navCooldownV <= 0) { panel.navVertical(ly > 0 ? 1 : -1); navCooldownV = 0.22; } } else navCooldownV = 0;
+                // Horizontal: continuous (proportional) adjust on numeric rows, else discrete step.
+                if (panel.focusedIsContinuous()) {
+                    if (Math.abs(lx) > 0.15) panel.adjustContinuous(lx * dt);
+                    navCooldownH = 0;
+                } else if (Math.abs(lx) > 0.6) {
+                    if (navCooldownH <= 0) { panel.navHorizontal(lx > 0 ? 1 : -1); navCooldownH = 0.22; }
+                } else navCooldownH = 0;
+            }
+            if (right?.selecting && !prevSelecting) panel.activate(); // trigger = confirm
+            prevSelecting = !!right?.selecting;
+            const bPressed = !!(rpad && rpad.buttons.length > 5 && rpad.buttons[5].pressed);
+            if (bPressed && !prevB) panel.close();
+            prevB = bPressed;
+            return;
+        }
+
+        // --- Panel CLOSED: locomotion always; brush only in Seleção mode ------
         locomotion.update({ leftSource: left, rightSource: right, dt, data });
 
-        if (!right) return; // selection needs the right controller
-        const pad = right.gamepad;
-
-        // (Right stick is movement-only now — brush distance is set via the panel
-        //  slider / desktop; locomotion owns both right-stick axes.)
-        // Right A/B: toggle mode / clear.
-        if (pad && pad.buttons.length > 5) {
-            const a = pad.buttons[4].pressed, b = pad.buttons[5].pressed;
-            if (a && !prevA) data.set('selectionMode', data.get('selectionMode') === 'additive' ? 'subtractive' : 'additive');
-            if (b && !prevB) data.emit('clearSelection');
-            prevA = a; prevB = b;
-        }
-        // Brush size via LEFT buttons (X = shrink, Y = grow), freeing the right stick for turning.
-        const lpad = left?.gamepad;
+        // Brush size on left X/− and Y/+ (hold to repeat). Icons hint this on the model.
         if (lpad && lpad.buttons.length > 5) {
-            const cur = data.get('brushSize') ?? 0.15;
-            if (lpad.buttons[5].pressed) data.set('brushSize', pc.math.clamp(cur + dt * 0.5, 0.02, 1.0));
-            else if (lpad.buttons[4].pressed) data.set('brushSize', pc.math.clamp(cur - dt * 0.5, 0.02, 1.0));
+            const bs = data.get('brushSize') ?? 0.15;
+            if (lpad.buttons[5].pressed) data.set('brushSize', +pc.math.clamp(bs + dt * 0.4, 0.02, 1).toFixed(3));
+            else if (lpad.buttons[4].pressed) data.set('brushSize', +pc.math.clamp(bs - dt * 0.4, 0.02, 1).toFixed(3));
+        }
+
+        if (!right || (panel && panel.currentModeId !== 'select')) {
+            prevSelecting = !!right?.selecting; // keep stroke-edge state coherent
+            return;
         }
 
         const mode = data.get('selectionMode') === 'subtractive' ? SELECT_SUBTRACTIVE : SELECT_ADDITIVE;
         const brush = data.get('brushSize') ?? 0.15;
         const dist = data.get('xrRayDistance') ?? 1.5;
 
-        // Brush center: fixed distance along the ray (default), or surface snap if enabled.
+        // Brush center: fixed distance along the ray (default), or CPU-index
+        // surface snap (lateral stays on the ray; only the depth is snapped).
         brushCenter.copy(right.getDirection()).mulScalar(dist).add(right.getOrigin());
-        if (data.get('xrSnapToSurface')) {
-            const now = performance.now();
-            if (now - lastSnap > 70) {
-                lastSnap = now;
-                snap(right.getOrigin(), right.getDirection()).then((wp) => {
-                    snapValid = !!wp;
-                    if (wp) snappedCenter.copy(wp);
+        if (data.get('xrSnapToSurface') && splatIndex) {
+            const rawT = splatIndex.raycast(right.getOrigin(), right.getDirection(), SNAP_MAX_DIST);
+            const depth = updateSmoothedDepth(rawT, dist, dt);
+            brushCenter.copy(right.getDirection()).mulScalar(depth).add(right.getOrigin());
+            if ((snapStats.total & 7) === 0) {
+                data.set('snapStats', {
+                    depth: +depth.toFixed(3),
+                    jitter: +snapStats.jitter.toFixed(4),
+                    dropout: +(1 - snapStats.hits / Math.max(1, snapStats.total)).toFixed(3)
                 });
             }
-            if (snapValid) brushCenter.copy(snappedCenter);
+        } else if (smoothDepth != null) {
+            resetSnap();
         }
 
         // Visible brush sphere: position + size + mode color (feedback).
         const col = mode === SELECT_ADDITIVE ? pc.Color.GREEN : pc.Color.RED;
         app.drawWireSphere(brushCenter, brush, col, 16);
 
+        // Stroke boundaries for undo (rising/falling edge of the trigger).
+        if (right.selecting && !prevSelecting) system.beginStroke();
+        else if (!right.selecting && prevSelecting) system.endStroke();
+        prevSelecting = right.selecting;
+
         if (right.selecting) {
             system.queueSelect(brushCenter, brush, mode);
         }
     };
 
-    const destroy = () => {
-        picker.destroy();
-        pickCam.destroy();
-    };
+    const destroy = () => {};
 
     return {
         enter,

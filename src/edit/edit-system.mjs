@@ -20,7 +20,7 @@ import * as pc from 'playcanvas';
  * No base splat data is needed on the CPU (the GPU supplies it), so this works
  * for compressed and SOG sources too.
  */
-export function createEditSystem({ system, data }) {
+export function createEditSystem({ system, data, history }) {
     const pivot = new pc.Vec3();
 
     // reusable temporaries
@@ -119,7 +119,23 @@ export function createEditSystem({ system, data }) {
         }
     };
 
+    // Write previous/next per-splat mirror values back for an undo/redo record.
+    const writeMirrorSubset = (s, ids, quat, ts, color) => {
+        const m = getMirror(s);
+        for (let j = 0; j < ids.length; j++) {
+            const k = ids[j] * 4;
+            const j4 = j * 4;
+            m.quat[k] = quat[j4]; m.quat[k + 1] = quat[j4 + 1]; m.quat[k + 2] = quat[j4 + 2]; m.quat[k + 3] = quat[j4 + 3];
+            m.ts[k] = ts[j4]; m.ts[k + 1] = ts[j4 + 1]; m.ts[k + 2] = ts[j4 + 2]; m.ts[k + 3] = ts[j4 + 3];
+            m.color[k] = color[j4]; m.color[k + 1] = color[j4 + 1]; m.color[k + 2] = color[j4 + 2]; m.color[k + 3] = color[j4 + 3];
+        }
+        uploadMirror(s, true);
+        if (s.entity?.gsplat) s.entity.gsplat.workBufferUpdate = pc.WORKBUFFER_UPDATE_ONCE;
+    };
+
     // Fold the active operation into every selected splat's stored transform.
+    // Captures the previous/next mirror values of exactly the touched splats so the
+    // commit can be undone/redone (memory ∝ selection size).
     const commit = async () => {
         const ra = activeQuat().clone();
         const sa = data.get('editScale');
@@ -129,17 +145,34 @@ export function createEditSystem({ system, data }) {
         const col = data.get('editColor') ?? [1, 1, 1];
         const cr = Math.round(col[0] * 255), cg = Math.round(col[1] * 255), cb = Math.round(col[2] * 255);
 
+        const records = [];
         for (const s of system.selectables) {
             const tex = s.gsplatComponent.getInstanceTexture('selectionMask');
             if (!tex) continue;
             const mask = await tex.read(0, 0, tex.width, tex.height);
             const m = getMirror(s);
             const n = s.numSplats;
-            let touched = false;
-            for (let i = 0; i < n; i++) {
-                if (mask[i] <= 127) continue;
-                touched = true;
-                const k = i * 4;
+
+            // Collect affected splat indices.
+            const ids = [];
+            for (let i = 0; i < n; i++) if (mask[i] > 127) ids.push(i);
+            if (ids.length === 0) continue;
+
+            // Snapshot previous values for these splats.
+            const count = ids.length;
+            const prevQuat = new Float32Array(count * 4);
+            const prevTS = new Float32Array(count * 4);
+            const prevColor = new Uint8Array(count * 4);
+            for (let j = 0; j < count; j++) {
+                const k = ids[j] * 4, j4 = j * 4;
+                prevQuat[j4] = m.quat[k]; prevQuat[j4 + 1] = m.quat[k + 1]; prevQuat[j4 + 2] = m.quat[k + 2]; prevQuat[j4 + 3] = m.quat[k + 3];
+                prevTS[j4] = m.ts[k]; prevTS[j4 + 1] = m.ts[k + 1]; prevTS[j4 + 2] = m.ts[k + 2]; prevTS[j4 + 3] = m.ts[k + 3];
+                prevColor[j4] = m.color[k]; prevColor[j4 + 1] = m.color[k + 1]; prevColor[j4 + 2] = m.color[k + 2]; prevColor[j4 + 3] = m.color[k + 3];
+            }
+
+            // Fold the op into the mirror for the affected splats.
+            for (let j = 0; j < count; j++) {
+                const k = ids[j] * 4;
                 // q' = Ra ⊗ qi
                 qi.set(m.quat[k], m.quat[k + 1], m.quat[k + 2], m.quat[k + 3]);
                 qn.mul2(ra, qi);
@@ -158,12 +191,31 @@ export function createEditSystem({ system, data }) {
                     m.color[k] = cr; m.color[k + 1] = cg; m.color[k + 2] = cb; m.color[k + 3] = 255;
                 }
             }
-            if (touched) {
-                uploadMirror(s, colEnabled);
-                s.entity.gsplat.workBufferUpdate = pc.WORKBUFFER_UPDATE_ONCE;
+
+            // Snapshot next values for redo.
+            const nextQuat = new Float32Array(count * 4);
+            const nextTS = new Float32Array(count * 4);
+            const nextColor = new Uint8Array(count * 4);
+            for (let j = 0; j < count; j++) {
+                const k = ids[j] * 4, j4 = j * 4;
+                nextQuat[j4] = m.quat[k]; nextQuat[j4 + 1] = m.quat[k + 1]; nextQuat[j4 + 2] = m.quat[k + 2]; nextQuat[j4 + 3] = m.quat[k + 3];
+                nextTS[j4] = m.ts[k]; nextTS[j4 + 1] = m.ts[k + 1]; nextTS[j4 + 2] = m.ts[k + 2]; nextTS[j4 + 3] = m.ts[k + 3];
+                nextColor[j4] = m.color[k]; nextColor[j4 + 1] = m.color[k + 1]; nextColor[j4 + 2] = m.color[k + 2]; nextColor[j4 + 3] = m.color[k + 3];
             }
+
+            uploadMirror(s, colEnabled);
+            s.entity.gsplat.workBufferUpdate = pc.WORKBUFFER_UPDATE_ONCE;
+            records.push({ s, ids: Int32Array.from(ids), prevQuat, prevTS, prevColor, nextQuat, nextTS, nextColor });
         }
         reset();
+
+        if (records.length && history) {
+            history.push({
+                label: 'edição',
+                undo: () => { for (const r of records) writeMirrorSubset(r.s, r.ids, r.prevQuat, r.prevTS, r.prevColor); },
+                redo: () => { for (const r of records) writeMirrorSubset(r.s, r.ids, r.nextQuat, r.nextTS, r.nextColor); }
+            });
+        }
     };
 
     // Reset the active op back to identity (keeps `editing` on).
@@ -178,6 +230,23 @@ export function createEditSystem({ system, data }) {
     // Expose mirrors for the PLY exporter.
     const getEditedMirror = (s) => getMirror(s);
 
+    // Re-apply a source object's committed per-splat transforms onto `target`,
+    // mapping target splat j ← source splat srcIndices[j] (1:1 correspondence).
+    // Used by the retexture flow: the result PLY (original coords) gets the same
+    // edits the selection had. Color override is NOT copied (retexture set color).
+    const reapplyEdits = (target, src, srcIndices) => {
+        const sm = getMirror(src);
+        const tm = getMirror(target);
+        const n = Math.min(srcIndices.length, target.numSplats);
+        for (let j = 0; j < n; j++) {
+            const si = srcIndices[j] * 4, tj = j * 4;
+            tm.quat[tj] = sm.quat[si]; tm.quat[tj + 1] = sm.quat[si + 1]; tm.quat[tj + 2] = sm.quat[si + 2]; tm.quat[tj + 3] = sm.quat[si + 3];
+            tm.ts[tj] = sm.ts[si]; tm.ts[tj + 1] = sm.ts[si + 1]; tm.ts[tj + 2] = sm.ts[si + 2]; tm.ts[tj + 3] = sm.ts[si + 3];
+        }
+        uploadMirror(target, false);
+        if (target.entity?.gsplat) target.entity.gsplat.workBufferUpdate = pc.WORKBUFFER_UPDATE_ONCE;
+    };
+
     // --- wiring -------------------------------------------------------------
     const previewFields = ['editTx', 'editTy', 'editTz', 'editRx', 'editRy', 'editRz', 'editScale', 'editColor', 'editColorEnabled'];
     for (const f of previewFields) data.on(`${f}:set`, pushPreview);
@@ -191,5 +260,5 @@ export function createEditSystem({ system, data }) {
 
     pushPreview();
 
-    return { pushPreview, recomputePivot, commit, reset, getEditedMirror, getPivot: () => pivot };
+    return { pushPreview, recomputePivot, commit, reset, getEditedMirror, reapplyEdits, getPivot: () => pivot };
 }

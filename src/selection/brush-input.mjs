@@ -52,6 +52,7 @@ export function createDesktopBrushInput({ app, canvas, camera, orbitInput, syste
         if (e.button === pc.MOUSEBUTTON_RIGHT) {
             isSelecting = true;
             pickerDirty = true;
+            system.beginStroke();
             if (orbitInput) {
                 orbitInput.enabled = false;
                 orbitInput.panButtonDown = false; // cancel pan orbit-camera started
@@ -65,6 +66,7 @@ export function createDesktopBrushInput({ app, canvas, camera, orbitInput, syste
     };
 
     const stop = () => {
+        if (isSelecting) system.endStroke();
         isSelecting = false;
         if (orbitInput) orbitInput.enabled = true;
     };

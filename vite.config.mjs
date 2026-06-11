@@ -62,6 +62,29 @@ export default defineConfig(({ mode }) => {
             fs: {
                 // Allow Vite to serve the engine source, which lives outside this project.
                 allow: [projectRoot, engineRoot]
+            },
+            // Proxy the retexture service (runs on the dev-server machine at :5000).
+            // Browser requests stay same-origin/HTTPS — avoids mixed-content (WebXR is
+            // HTTPS) and CORS, and lets the headset reach a service bound to localhost.
+            proxy: {
+                // Download path FIRST (more specific). Follows service-side redirects
+                // (e.g. /download_ply/Fruits → 40000.ply) so the proxy returns the
+                // final file. It's a GET (no body), so the follow-redirects request
+                // body limit doesn't apply.
+                '/retex/download_ply': {
+                    target: env.RETEXTURE_SERVICE || 'http://localhost:5000',
+                    changeOrigin: true,
+                    followRedirects: true,
+                    rewrite: (p) => p.replace(/^\/retex/, '')
+                },
+                // Everything else (incl. the retexture POST). NO followRedirects here:
+                // the multipart upload (large texture) exceeds follow-redirects' body
+                // limit (ERR_FR_MAX_BODY_LENGTH_EXCEEDED).
+                '/retex': {
+                    target: env.RETEXTURE_SERVICE || 'http://localhost:5000',
+                    changeOrigin: true,
+                    rewrite: (p) => p.replace(/^\/retex/, '')
+                }
             }
         },
         optimizeDeps: {

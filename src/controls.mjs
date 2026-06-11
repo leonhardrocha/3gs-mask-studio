@@ -76,6 +76,16 @@ export function buildControls(data) {
     snapChk.checked = !!data.get('xrSnapToSurface');
     snapChk.onchange = () => data.set('xrSnapToSurface', snapChk.checked);
 
+    // --- History (undo/redo) ------------------------------------------------
+    const undoBtn = el('button', { type: 'button', text: 'Desfazer (Ctrl+Z)' });
+    undoBtn.disabled = !data.get('canUndo');
+    undoBtn.onclick = () => data.emit('undo');
+    data.on('canUndo:set', v => { undoBtn.disabled = !v; });
+    const redoBtn = el('button', { type: 'button', text: 'Refazer (Ctrl+Shift+Z)' });
+    redoBtn.disabled = !data.get('canRedo');
+    redoBtn.onclick = () => data.emit('redo');
+    data.on('canRedo:set', v => { redoBtn.disabled = !v; });
+
     // --- Selection ----------------------------------------------------------
     const modeSelect = el('select');
     [['additive', 'Aditiva (+)'], ['subtractive', 'Subtrativa (−)']]
@@ -84,6 +94,22 @@ export function buildControls(data) {
     modeSelect.onchange = () => data.set('selectionMode', modeSelect.value);
 
     const brush = slider(data.get('brushSize'), 0.05, 0.5, 0.01, v => data.set('brushSize', v));
+
+    // Active selection target: 'all' or a specific object (rebuilt as assets change).
+    const targetSelect = el('select');
+    const renderTargets = () => {
+        const items = data.get('assetVisibilityItems') ?? [];
+        const current = data.get('activeSelectionTarget') ?? 'all';
+        const names = new Set(['all', ...items.map(i => i.name)]);
+        targetSelect.replaceChildren(el('option', { value: 'all', text: 'Todos' }));
+        for (const item of items) targetSelect.append(el('option', { value: item.name, text: item.label }));
+        if (!names.has(current)) data.set('activeSelectionTarget', 'all');
+        targetSelect.value = names.has(current) ? current : 'all';
+    };
+    targetSelect.onchange = () => data.set('activeSelectionTarget', targetSelect.value);
+    data.on('assetVisibilityItems:set', renderTargets);
+    data.on('activeSelectionTarget:set', v => { targetSelect.value = v; });
+    renderTargets();
 
     const clearBtn = el('button', { type: 'button', text: 'Limpar seleção' });
     clearBtn.onclick = () => data.emit('clearSelection');
@@ -163,6 +189,20 @@ export function buildControls(data) {
     const exportBtn = el('button', { type: 'button', text: 'Exportar .ply' });
     exportBtn.onclick = () => data.emit('exportPly', exportScope.value);
 
+    // --- Retexture ----------------------------------------------------------
+    const retexObjSelect = el('select');
+    (data.get('retexObjects') || ['Fruits']).forEach(n => retexObjSelect.append(el('option', { value: n, text: n })));
+    retexObjSelect.value = data.get('retextureRunName') || 'Fruits';
+    retexObjSelect.onchange = () => data.set('retextureRunName', retexObjSelect.value);
+    data.on('retextureRunName:set', v => { retexObjSelect.value = v; });
+    const addObjBtn = el('button', { type: 'button', text: 'Adicionar objeto' });
+    addObjBtn.onclick = () => data.emit('addRetexObject');
+
+    const retexStatus = el('span', { class: 'row-label', text: data.get('retextureStatus') || 'pronto' });
+    data.on('retextureStatus:set', v => { retexStatus.textContent = v; });
+    const retexBtn = el('button', { type: 'button', text: 'Aplicar retexturização' });
+    retexBtn.onclick = () => data.emit('applyRetexture');
+
     // --- Dynamic asset loading ---------------------------------------------
     const urlInput = el('input', { type: 'text', placeholder: 'nome-do-arquivo.ply' });
     const addBtn = el('button', { type: 'button', text: 'Adicionar' });
@@ -171,14 +211,17 @@ export function buildControls(data) {
     // --- Assemble -----------------------------------------------------------
     body.replaceChildren(
         panel('Renderer', row('Renderer', rendererSelect)),
+        panel('Histórico', undoBtn, redoBtn),
         panel('XR',
             row('Raio visível', rayChk),
             row('Distância do raio', boundSlider(data, 'xrRayDistance', 0.2, 8, 0.05)),
             row('Velocidade mov.', boundSlider(data, 'xrMoveSpeed', 0.3, 5, 0.1)),
-            row('Snap superfície (exp.)', snapChk),
+            row('Snap superfície (índice CPU)', snapChk),
+            row('Precisão do snap', boundSlider(data, 'snapBeamRadius', 0.01, 0.2, 0.005)),
             enterVrBtn
         ),
         panel('Seleção',
+            row('Objeto ativo', targetSelect),
             row('Modo', modeSelect),
             row('Tamanho do pincel', brush),
             clearBtn,
@@ -212,6 +255,13 @@ export function buildControls(data) {
         panel('Exportar',
             row('Escopo', exportScope),
             exportBtn
+        ),
+        panel('Retexturizar',
+            row('Objeto', retexObjSelect),
+            addObjBtn,
+            row('Textura', el('span', { class: 'row-label', text: data.get('retextureTextureName') || '—' })),
+            retexBtn,
+            row('Status', retexStatus)
         ),
         panel('Visibilidade dos Assets', visibilityList),
         panel('Carregar Asset', el('div', { class: 'add-asset' }, urlInput, addBtn))

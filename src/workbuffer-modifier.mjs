@@ -110,6 +110,9 @@ export const workBufferModifier = {
         }
 
         void modifySplatColor(vec3 center, inout vec4 color) {
+            // hidden splats (e.g. region replaced by a retexture) become transparent
+            if (texelFetch(hidden, splat.uv, 0).r > 0.5) { color.a = 0.0; return; }
+
             // committed color override
             vec4 ec = texelFetch(editColor, splat.uv, 0);
             if (ec.a > 0.5) color.rgb = ec.rgb;
@@ -246,6 +249,8 @@ export const workBufferModifier = {
         }
 
         fn modifySplatColor(center: vec3f, color: ptr<function, vec4f>) {
+            if (textureLoad(hidden, splat.uv, 0).r > 0.5) { (*color).a = 0.0; return; }
+
             let ec = textureLoad(editColor, splat.uv, 0);
             if (ec.a > 0.5) { (*color).rgb = ec.rgb; }
 
